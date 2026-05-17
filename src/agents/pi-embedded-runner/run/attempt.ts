@@ -6,6 +6,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { isAcpRuntimeSpawnAvailable } from "../../../acp/runtime/availability.js";
 import { buildHierarchyReinforcementMessage } from "../../../auto-reply/handoff-summarizer.js";
 import { filterHeartbeatPairs } from "../../../auto-reply/heartbeat-filter.js";
+import { stripInboundMetadata } from "../../../auto-reply/reply/strip-inbound-meta.js";
 import { getRuntimeConfig } from "../../../config/config.js";
 import { resolveStorePath } from "../../../config/sessions/paths.js";
 import {
@@ -270,10 +271,15 @@ import { abortable as abortableWithSignal } from "./abortable.js";
 import { createEmbeddedAgentSessionWithResourceLoader } from "./attempt-session.js";
 import {
   applyEmbeddedAttemptToolsAllow,
+  mergeForcedEmbeddedAttemptToolsAllow,
   resolveEmbeddedAttemptToolConstructionPlan,
   shouldCreateBundleLspRuntimeForAttempt,
   shouldCreateBundleMcpRuntimeForAttempt,
 } from "./attempt-tool-construction-plan.js";
+import {
+  resolveAttemptTrajectoryTerminal,
+  resolveTerminalAssistantTexts,
+} from "./attempt-trajectory-status.js";
 export { buildContextEnginePromptCacheInfo } from "./attempt.context-engine-helpers.js";
 import {
   rotateTranscriptAfterCompaction,
@@ -350,12 +356,17 @@ import {
   selectCompactionTimeoutSnapshot,
   shouldFlagCompactionTimeout,
 } from "./compaction-timeout.js";
+import { resolveFinalAssistantVisibleText } from "./helpers.js";
 import {
   installHistoryImagePruneContextTransform,
   pruneProcessedHistoryImages,
 } from "./history-image-prune.js";
 import { detectAndLoadPromptImages } from "./images.js";
-import { buildAttemptReplayMetadata } from "./incomplete-turn.js";
+import {
+  buildAttemptReplayMetadata,
+  resolveSilentToolResultReplyPayload,
+  shouldTreatEmptyAssistantReplyAsSilent,
+} from "./incomplete-turn.js";
 import { resolveLlmIdleTimeoutMs, streamWithIdleTimeout } from "./llm-idle-timeout.js";
 import { resolveMessageMergeStrategy } from "./message-merge-strategy.js";
 import {
@@ -368,7 +379,7 @@ import {
   shouldPreemptivelyCompactBeforePrompt,
 } from "./preemptive-compaction.js";
 import {
-  buildCurrentTurnPrompt,
+  buildCurrentInboundPrompt,
   buildRuntimeContextSystemContext,
   queueRuntimeContextForNextTurn,
   resolveRuntimeContextPromptParts,
@@ -651,7 +662,86 @@ function summarizeSessionContext(messages: AgentMessage[]): {
 
 export function normalizeMessagesForLlmBoundary(messages: AgentMessage[]): AgentMessage[] {
   const normalized = stripToolResultDetails(normalizeAssistantReplayContent(messages));
-  return stripHistoricalRuntimeContextCustomMessages(normalized);
+  const withoutHistoricalInboundMetadata =
+    stripHistoricalInboundMetadataFromUserMessages(normalized);
+  return stripHistoricalRuntimeContextCustomMessages(withoutHistoricalInboundMetadata);
+}
+
+function stripHistoricalInboundMetadataFromUserMessages(messages: AgentMessage[]): AgentMessage[] {
+  const activeUserMessageIndex = findActiveUserMessageIndex(messages);
+  let changed = false;
+  const nextMessages = messages.map((message, index) => {
+    if (message.role !== "user" || index === activeUserMessageIndex) {
+      return message;
+    }
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === "string") {
+      const stripped = stripInboundMetadata(content);
+      if (stripped === content) {
+        return message;
+      }
+      changed = true;
+      return { ...message, content: stripped } as AgentMessage;
+    }
+    if (!Array.isArray(content)) {
+      return message;
+    }
+    let contentChanged = false;
+    const nextContent = content.map((block) => {
+      if (!block || typeof block !== "object") {
+        return block;
+      }
+      const textBlock = block as { type?: unknown; text?: unknown };
+      if (textBlock.type !== "text" || typeof textBlock.text !== "string") {
+        return block;
+      }
+      const stripped = stripInboundMetadata(textBlock.text);
+      if (stripped === textBlock.text) {
+        return block;
+      }
+      contentChanged = true;
+      return Object.assign({}, block, { text: stripped });
+    });
+    if (!contentChanged) {
+      return message;
+    }
+    changed = true;
+    return { ...message, content: nextContent } as AgentMessage;
+  });
+  return changed ? nextMessages : messages;
+}
+
+function findActiveUserMessageIndex(messages: AgentMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message) {
+      continue;
+    }
+    if (message.role === "user") {
+      return index;
+    }
+    if (message.role === "assistant" && !isToolCallAssistantMessage(message)) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+function isToolCallAssistantMessage(message: AgentMessage): boolean {
+  if (message.role !== "assistant") {
+    return false;
+  }
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  return content.some((block) => {
+    if (!block || typeof block !== "object") {
+      return false;
+    }
+    const type = (block as { type?: unknown }).type;
+    return type === "toolCall" || type === "toolUse" || type === "functionCall";
+  });
 }
 
 function cloneHookMessages(messages: AgentMessage[]): AgentMessage[] {
@@ -675,6 +765,15 @@ function flushSessionManagerFile(sessionManager: ReturnType<typeof guardSessionM
 
 export function shouldRunLlmOutputHooksForAttempt(params: { promptErrorSource: string | null }) {
   return params.promptErrorSource !== "hook:before_agent_run";
+}
+
+function hasVisiblePendingToolMediaReply(
+  reply: { mediaUrls?: string[]; audioAsVoice?: boolean } | null | undefined,
+): boolean {
+  return Boolean(
+    reply &&
+    ((reply.mediaUrls ?? []).some((url) => url.trim().length > 0) || reply.audioAsVoice === true),
+  );
 }
 
 function isMidTurnPrecheckAssistantError(message: AgentMessage | undefined): boolean {
@@ -940,7 +1039,7 @@ export async function runEmbeddedAttempt(
     prepStages.mark("skills");
 
     const sessionLabel = params.sessionKey ?? params.sessionId;
-    const contextInjectionMode = resolveContextInjectionMode(params.config);
+    const contextInjectionMode = resolveContextInjectionMode(params.config, sessionAgentId);
     const isRawModelRun = params.modelRun === true || params.promptMode === "none";
     if (isRawModelRun && log.isEnabled("debug")) {
       log.debug(
@@ -989,10 +1088,18 @@ export async function runEmbeddedAttempt(
       });
     };
     const corePluginToolStages = createEmbeddedRunStageTracker();
+    const toolsAllowWithForcedRuntimeTools = mergeForcedEmbeddedAttemptToolsAllow(
+      params.toolsAllow,
+      {
+        forceMessageTool:
+          params.forceMessageTool === true ||
+          params.sourceReplyDeliveryMode === "message_tool_only",
+      },
+    );
     const toolConstructionPlan = resolveEmbeddedAttemptToolConstructionPlan({
       disableTools: params.disableTools,
       isRawModelRun,
-      toolsAllow: params.toolsAllow,
+      toolsAllow: toolsAllowWithForcedRuntimeTools,
     });
     const toolsEnabled = supportsModelTools(params.model);
     const codeModeConfig = resolveCodeModeConfig(params.config);
@@ -1010,9 +1117,14 @@ export async function runEmbeddedAttempt(
       !codeModeControlsEnabledForRun &&
       resolveToolSearchConfig(params.config).enabled;
     const effectiveToolsAllow =
-      toolSearchControlsEnabledForRun && params.toolsAllow
-        ? [...new Set([...params.toolsAllow, ...TOOL_SEARCH_CONTROL_ALLOWLIST_NAMES])]
-        : params.toolsAllow;
+      toolSearchControlsEnabledForRun && toolsAllowWithForcedRuntimeTools
+        ? [
+            ...new Set([
+              ...toolsAllowWithForcedRuntimeTools,
+              ...TOOL_SEARCH_CONTROL_ALLOWLIST_NAMES,
+            ]),
+          ]
+        : toolsAllowWithForcedRuntimeTools;
     const shouldConstructTools =
       toolConstructionPlan.constructTools ||
       toolSearchControlsEnabledForRun ||
@@ -1097,6 +1209,7 @@ export async function runEmbeddedAttempt(
             requireExplicitMessageTarget:
               params.requireExplicitMessageTarget ?? isSubagentSessionKey(params.sessionKey),
             sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
+            inboundEventKind: params.currentInboundEventKind,
             disableMessageTool: params.disableMessageTool,
             forceMessageTool: params.forceMessageTool,
             enableHeartbeatTool: params.enableHeartbeatTool,
@@ -1104,6 +1217,7 @@ export async function runEmbeddedAttempt(
             authProfileStore: params.authProfileStore,
             recordToolPrepStage: (name) => corePluginToolStages.mark(name),
             onToolOutcome: params.onToolOutcome,
+            skillsSnapshot: skillsSnapshotForRun,
             onYield: (message) => {
               yieldDetected = true;
               yieldMessage = message;
@@ -1194,6 +1308,7 @@ export async function runEmbeddedAttempt(
             config: params.config,
             sessionKey: params.sessionKey,
             sessionId: params.sessionId,
+            agentId: sessionAgentId,
             warn: bootstrapWarn,
             contextMode: params.bootstrapContextMode,
             runKind: params.bootstrapContextRunKind,
@@ -1202,6 +1317,7 @@ export async function runEmbeddedAttempt(
           bootstrapFiles,
           contextFiles: buildBootstrapContextForFiles(bootstrapFiles, {
             config: params.config,
+            agentId: sessionAgentId,
             warn: bootstrapWarn,
           }),
         };
@@ -1219,8 +1335,8 @@ export async function runEmbeddedAttempt(
     const bootstrapFilesForInjectionStats = bootstrapRouting.includeBootstrapInSystemContext
       ? hookAdjustedBootstrapFiles
       : hookAdjustedBootstrapFiles.filter((file) => file.name !== DEFAULT_BOOTSTRAP_FILENAME);
-    const bootstrapMaxChars = resolveBootstrapMaxChars(params.config);
-    const bootstrapTotalMaxChars = resolveBootstrapTotalMaxChars(params.config);
+    const bootstrapMaxChars = resolveBootstrapMaxChars(params.config, sessionAgentId);
+    const bootstrapTotalMaxChars = resolveBootstrapTotalMaxChars(params.config, sessionAgentId);
     const bootstrapAnalysis = analyzeBootstrapBudget({
       files: buildBootstrapInjectionStats({
         bootstrapFiles: bootstrapFilesForInjectionStats,
@@ -1738,6 +1854,8 @@ export async function runEmbeddedAttempt(
             : undefined,
         allowedToolNames: replayAllowedToolNames,
         suppressNextUserMessagePersistence: params.suppressNextUserMessagePersistence,
+        suppressTranscriptOnlyAssistantPersistence:
+          params.suppressTranscriptOnlyAssistantPersistence,
         onUserMessagePersisted: (message) => {
           params.onUserMessagePersisted?.(message);
         },
@@ -2821,6 +2939,7 @@ export async function runEmbeddedAttempt(
         getMessagingToolSentTargets,
         getHeartbeatToolResponse,
         getPendingToolMediaReply,
+        getVisibleBlockReplyCount,
         getSuccessfulCronAdds,
         getReplayState,
         didSendViaMessagingTool,
@@ -2886,6 +3005,7 @@ export async function runEmbeddedAttempt(
         },
         isStreaming: () => activeSession.isStreaming,
         isCompacting: () => subscription.isCompacting(),
+        sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
         cancel: () => {
           abortRun();
         },
@@ -3243,9 +3363,12 @@ export async function runEmbeddedAttempt(
           const promptSubmission = resolveRuntimeContextPromptParts({
             effectivePrompt,
             transcriptPrompt: effectiveTranscriptPrompt,
+            emptyTranscriptMode: params.suppressNextUserMessagePersistence
+              ? "model-prompt"
+              : "runtime-event",
           });
-          const promptForModel = buildCurrentTurnPrompt({
-            context: promptSubmission.runtimeOnly ? undefined : params.currentTurnContext,
+          const promptForModel = buildCurrentInboundPrompt({
+            context: promptSubmission.runtimeOnly ? undefined : params.currentInboundContext,
             prompt: promptSubmission.prompt,
           });
           const runtimeSystemContext = promptSubmission.runtimeSystemContext?.trim();
@@ -3268,6 +3391,15 @@ export async function runEmbeddedAttempt(
                 appendSystemContext: buildRuntimeContextSystemContext(runtimeContextForHook),
               })
             : undefined;
+          if (systemPromptReport) {
+            systemPromptReport.currentTurn = {
+              ...(params.currentInboundEventKind ? { kind: params.currentInboundEventKind } : {}),
+              promptChars: promptForModel.length,
+              runtimeContextChars: promptSubmission.runtimeOnly
+                ? (runtimeSystemContext?.length ?? 0)
+                : (runtimeContextForHook?.length ?? 0),
+            };
+          }
           const systemPromptForHook = runtimeSystemPromptForHook ?? systemPromptText;
 
           const persistBlockedBeforeAgentRun = async (block: {
@@ -4145,6 +4277,91 @@ export async function runEmbeddedAttempt(
       const replayMetadata = replayMetadataFromState(
         observeReplayMetadata(getReplayState(), observedReplayMetadata),
       );
+      const completedClientToolCalls = clientToolCallSlots.flatMap((slot) =>
+        slot.completed && slot.params
+          ? [
+              {
+                name: slot.name,
+                params: slot.params,
+              },
+            ]
+          : [],
+      );
+      const completedClientToolCallsForAttempt =
+        completedClientToolCalls.length > 0 ? completedClientToolCalls : undefined;
+      const didSendDeterministicApprovalPromptNow = didSendDeterministicApprovalPrompt();
+      const lastToolError = getLastToolError?.();
+      const heartbeatToolResponse = getHeartbeatToolResponse();
+      const pendingToolMediaPayloadCount = hasVisiblePendingToolMediaReply(pendingToolMediaReply)
+        ? 1
+        : 0;
+      const visibleBlockReplyCount = getVisibleBlockReplyCount();
+      const silentToolResultReplyPayload = resolveSilentToolResultReplyPayload({
+        isCronTrigger: params.trigger === "cron",
+        payloadCount: pendingToolMediaPayloadCount,
+        aborted,
+        timedOut,
+        attempt: {
+          clientToolCalls: completedClientToolCallsForAttempt,
+          yieldDetected,
+          didSendDeterministicApprovalPrompt: didSendDeterministicApprovalPromptNow,
+          lastToolError,
+          messagesSnapshot,
+          toolMetas: toolMetasNormalized,
+        },
+      });
+      const synthesizedPayloadCount =
+        visibleBlockReplyCount +
+        pendingToolMediaPayloadCount +
+        (silentToolResultReplyPayload ? 1 : 0);
+      const emptyAssistantReplyIsSilent = shouldTreatEmptyAssistantReplyAsSilent({
+        allowEmptyAssistantReplyAsSilent: params.allowEmptyAssistantReplyAsSilent,
+        payloadCount: 0,
+        aborted,
+        timedOut,
+        attempt: {
+          assistantTexts,
+          clientToolCalls: completedClientToolCallsForAttempt,
+          currentAttemptAssistant,
+          yieldDetected,
+          didSendDeterministicApprovalPrompt: didSendDeterministicApprovalPromptNow,
+          didSendViaMessagingTool: didSendViaMessagingTool(),
+          messagingToolSentTexts: getMessagingToolSentTexts(),
+          messagingToolSentMediaUrls: getMessagingToolSentMediaUrls(),
+          messagingToolSentTargets: getMessagingToolSentTargets(),
+          lastToolError,
+          lastAssistant,
+          replayMetadata,
+          promptErrorSource,
+          timedOutDuringCompaction,
+        },
+      });
+      const terminalAssistantTexts = resolveTerminalAssistantTexts({
+        assistantTexts,
+        lastAssistantStopReason: lastAssistant?.stopReason,
+        lastAssistantVisibleText: resolveFinalAssistantVisibleText(lastAssistant),
+      });
+      const attemptTrajectoryTerminal = resolveAttemptTrajectoryTerminal({
+        promptError,
+        aborted,
+        timedOut,
+        assistantTexts: terminalAssistantTexts,
+        toolMetas: toolMetasNormalized,
+        didSendViaMessagingTool: didSendViaMessagingTool(),
+        didSendDeterministicApprovalPrompt: didSendDeterministicApprovalPromptNow,
+        messagingToolSentTexts: getMessagingToolSentTexts(),
+        messagingToolSentMediaUrls: getMessagingToolSentMediaUrls(),
+        messagingToolSentTargets: getMessagingToolSentTargets(),
+        successfulCronAdds: getSuccessfulCronAdds(),
+        synthesizedPayloadCount,
+        heartbeatToolResponse,
+        clientToolCalls: completedClientToolCalls,
+        yieldDetected,
+        lastToolError,
+        silentExpected: params.silentExpected,
+        emptyAssistantReplyIsSilent,
+        lastAssistantStopReason: lastAssistant?.stopReason,
+      });
       trajectoryRecorder?.recordEvent("model.completed", {
         aborted,
         externalAbort,
@@ -4154,6 +4371,7 @@ export async function runEmbeddedAttempt(
         timedOutDuringToolExecution,
         promptError: promptError ? formatErrorMessage(promptError) : undefined,
         promptErrorSource,
+        terminalError: attemptTrajectoryTerminal.terminalError,
         usage: attemptUsage,
         promptCache,
         compactionCount: getCompactionCount(),
@@ -4164,7 +4382,7 @@ export async function runEmbeddedAttempt(
       trajectoryRecorder?.recordEvent(
         "trace.artifacts",
         buildTrajectoryArtifacts({
-          status: promptError ? "error" : aborted || timedOut ? "interrupted" : "success",
+          status: attemptTrajectoryTerminal.status,
           aborted,
           externalAbort,
           timedOut,
@@ -4173,6 +4391,7 @@ export async function runEmbeddedAttempt(
           timedOutDuringToolExecution,
           promptError: promptError ? formatErrorMessage(promptError) : undefined,
           promptErrorSource,
+          terminalError: attemptTrajectoryTerminal.terminalError,
           usage: attemptUsage,
           promptCache,
           compactionCount: getCompactionCount(),
@@ -4185,11 +4404,11 @@ export async function runEmbeddedAttempt(
           messagingToolSentTexts: getMessagingToolSentTexts(),
           messagingToolSentMediaUrls: getMessagingToolSentMediaUrls(),
           messagingToolSentTargets: getMessagingToolSentTargets(),
-          lastToolError: getLastToolError?.(),
+          lastToolError,
         }),
       );
       trajectoryRecorder?.recordEvent("session.ended", {
-        status: promptError ? "error" : aborted || timedOut ? "interrupted" : "success",
+        status: attemptTrajectoryTerminal.status,
         aborted,
         externalAbort,
         timedOut,
@@ -4197,19 +4416,9 @@ export async function runEmbeddedAttempt(
         timedOutDuringCompaction,
         timedOutDuringToolExecution,
         promptError: promptError ? formatErrorMessage(promptError) : undefined,
+        terminalError: attemptTrajectoryTerminal.terminalError,
       });
       trajectoryEndRecorded = true;
-
-      const completedClientToolCalls = clientToolCallSlots.flatMap((slot) =>
-        slot.completed && slot.params
-          ? [
-              {
-                name: slot.name,
-                params: slot.params,
-              },
-            ]
-          : [],
-      );
 
       return {
         replayMetadata,
@@ -4236,15 +4445,16 @@ export async function runEmbeddedAttempt(
         toolMetas: toolMetasNormalized,
         lastAssistant,
         currentAttemptAssistant,
-        lastToolError: getLastToolError?.(),
+        lastToolError,
         didSendViaMessagingTool: didSendViaMessagingTool(),
-        didSendDeterministicApprovalPrompt: didSendDeterministicApprovalPrompt(),
+        didSendDeterministicApprovalPrompt: didSendDeterministicApprovalPromptNow,
         messagingToolSentTexts: getMessagingToolSentTexts(),
         messagingToolSentMediaUrls: getMessagingToolSentMediaUrls(),
         messagingToolSentTargets: getMessagingToolSentTargets(),
-        heartbeatToolResponse: getHeartbeatToolResponse(),
+        heartbeatToolResponse,
         toolMediaUrls: pendingToolMediaReply?.mediaUrls,
         toolAudioAsVoice: pendingToolMediaReply?.audioAsVoice,
+        toolTrustedLocalMedia: pendingToolMediaReply?.trustedLocalMedia,
         successfulCronAdds: getSuccessfulCronAdds(),
         cloudCodeAssistFormatError: Boolean(
           lastAssistant?.errorMessage && isCloudCodeAssistFormatError(lastAssistant.errorMessage),

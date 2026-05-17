@@ -21,6 +21,7 @@ import {
   type ToolProgressDetailMode,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { emitTrustedDiagnosticEvent } from "openclaw/plugin-sdk/diagnostic-runtime";
+import { resolveCodexLocalRuntimeAttribution } from "./local-runtime-attribution.js";
 import { CodexNativeSubagentTaskMirror } from "./native-subagent-task-mirror.js";
 import { readCodexTurn } from "./protocol-validators.js";
 import {
@@ -40,7 +41,7 @@ import {
   sanitizeCodexAgentEventRecord,
   sanitizeCodexToolArguments,
 } from "./tool-progress-normalization.js";
-import { attachCodexMirrorIdentity } from "./transcript-mirror.js";
+import { attachCodexMirrorIdentity, buildCodexUserPromptMessage } from "./transcript-mirror.js";
 
 export type CodexAppServerToolTelemetry = {
   didSendViaMessagingTool: boolean;
@@ -260,14 +261,7 @@ export class CodexAppServerEventProjector {
     //     distinct turnIds → distinct identities → both kept.
     const turnId = this.turnId;
     const messagesSnapshot: AgentMessage[] = [
-      attachCodexMirrorIdentity(
-        {
-          role: "user",
-          content: this.params.prompt,
-          timestamp: Date.now(),
-        },
-        `${turnId}:prompt`,
-      ),
+      attachCodexMirrorIdentity(buildCodexUserPromptMessage(this.params), `${turnId}:prompt`),
     ];
     // Codex owns the canonical thread. These mirror records keep enough local
     // context for OpenClaw history, search, and future harness switching.
@@ -534,6 +528,7 @@ export class CodexAppServerEventProjector {
         data: {
           phase: "end",
           backend: "codex-app-server",
+          completed: true,
           threadId: this.threadId,
           turnId: this.turnId,
           itemId,
@@ -649,6 +644,7 @@ export class CodexAppServerEventProjector {
         this.emitPlanUpdate({ explanation: undefined, steps: splitPlanText(item.text) });
       }
       this.recordToolMeta(item);
+      this.emitSnapshotOnlyNativeToolProgress(item);
       this.recordNativeToolTranscriptCall(item);
       this.recordNativeToolTranscriptResult(item);
       this.emitAfterToolCallObservation(item);
@@ -657,6 +653,31 @@ export class CodexAppServerEventProjector {
     }
     this.activeCompactionItemIds.clear();
     await this.maybeEndReasoning();
+  }
+
+  private emitSnapshotOnlyNativeToolProgress(item: CodexThreadItem): void {
+    if (
+      !shouldSynthesizeToolProgressForItem(item) ||
+      !this.isCurrentTurnSnapshotItem(item) ||
+      this.completedItemIds.has(item.id) ||
+      itemStatus(item) === "running"
+    ) {
+      return;
+    }
+    const wasStarted = this.activeItemIds.has(item.id);
+    if (!wasStarted) {
+      this.emitStandardItemEvent({ phase: "start", item });
+      this.emitNormalizedToolItemEvent({ phase: "start", item });
+    }
+    this.activeItemIds.delete(item.id);
+    this.emitStandardItemEvent({ phase: "end", item });
+    this.emitNormalizedToolItemEvent({ phase: "result", item });
+    this.completedItemIds.add(item.id);
+  }
+
+  private isCurrentTurnSnapshotItem(item: CodexThreadItem): boolean {
+    const itemTurnId = readItemString(item, "turnId") ?? readItemString(item, "turn_id");
+    return itemTurnId === undefined || itemTurnId === this.turnId;
   }
 
   private handleOutputDelta(params: JsonObject, toolName: string): void {
@@ -716,8 +737,15 @@ export class CodexAppServerEventProjector {
       return;
     }
     const itemId = readString(item, "id") ?? `raw-assistant-${this.assistantItemOrder.length + 1}`;
+    const phase = readString(item, "phase");
+    if (phase) {
+      this.assistantPhaseByItem.set(itemId, phase);
+    }
     this.rememberAssistantItem(itemId);
     this.assistantTextByItem.set(itemId, text);
+    if (phase === "commentary") {
+      this.emitCommentaryProgress({ itemId, text });
+    }
   }
 
   private recordNativeGeneratedMedia(item: CodexThreadItem | undefined): void {
@@ -1187,6 +1215,7 @@ export class CodexAppServerEventProjector {
   }
 
   private createAssistantMessage(text: string): AssistantMessage {
+    const attribution = resolveCodexLocalRuntimeAttribution(this.params);
     const usage: Usage = this.tokenUsage
       ? {
           input: this.tokenUsage.input ?? 0,
@@ -1205,8 +1234,8 @@ export class CodexAppServerEventProjector {
     return {
       role: "assistant",
       content: [{ type: "text", text }],
-      api: this.params.model.api ?? "openai-codex-responses",
-      provider: this.params.provider,
+      api: attribution.api ?? "openai-codex-responses",
+      provider: attribution.provider,
       model: this.params.modelId,
       usage,
       stopReason: this.aborted ? "aborted" : this.promptError ? "error" : "stop",
@@ -1216,11 +1245,12 @@ export class CodexAppServerEventProjector {
   }
 
   private createAssistantMirrorMessage(title: string, text: string): AssistantMessage {
+    const attribution = resolveCodexLocalRuntimeAttribution(this.params);
     return {
       role: "assistant",
       content: [{ type: "text", text: `${title}:\n${text}` }],
-      api: this.params.model.api ?? "openai-codex-responses",
-      provider: this.params.provider,
+      api: attribution.api ?? "openai-codex-responses",
+      provider: attribution.provider,
       model: this.params.modelId,
       usage: ZERO_USAGE,
       stopReason: "stop",
@@ -1230,6 +1260,7 @@ export class CodexAppServerEventProjector {
 
   private createToolCallMessage(params: ToolTranscriptCallInput): AgentMessage {
     const args = normalizeToolTranscriptArguments(params.arguments);
+    const attribution = resolveCodexLocalRuntimeAttribution(this.params);
     return {
       role: "assistant",
       content: [
@@ -1241,8 +1272,8 @@ export class CodexAppServerEventProjector {
           input: args,
         },
       ],
-      api: this.params.model.api ?? "openai-codex-responses",
-      provider: this.params.provider,
+      api: attribution.api ?? "openai-codex-responses",
+      provider: attribution.provider,
       model: this.params.modelId,
       usage: ZERO_USAGE,
       stopReason: "toolUse",

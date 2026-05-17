@@ -1,5 +1,6 @@
 import { Type, type TSchema } from "typebox";
 import type { SourceReplyDeliveryMode } from "../../auto-reply/get-reply-options.types.js";
+import type { InboundEventKind } from "../../channels/inbound-event/kind.js";
 import { listChannelPlugins } from "../../channels/plugins/index.js";
 import {
   channelSupportsMessageCapability,
@@ -188,6 +189,25 @@ function buildSendSchema(options: { includePresentation: boolean; includeDeliver
     caption: Type.Optional(Type.String()),
     path: Type.Optional(Type.String()),
     filePath: Type.Optional(Type.String()),
+    attachments: Type.Optional(
+      Type.Array(
+        Type.Object({
+          type: Type.Optional(stringEnum(["image", "audio", "video", "file"])),
+          media: Type.Optional(Type.String()),
+          mediaUrl: Type.Optional(Type.String()),
+          path: Type.Optional(Type.String()),
+          filePath: Type.Optional(Type.String()),
+          fileUrl: Type.Optional(Type.String()),
+          url: Type.Optional(Type.String()),
+          name: Type.Optional(Type.String()),
+          mimeType: Type.Optional(Type.String()),
+        }),
+        {
+          description:
+            "Structured media attachments to send with the message. Each item needs media/mediaUrl/path/filePath/fileUrl/url.",
+        },
+      ),
+    ),
     replyTo: Type.Optional(Type.String()),
     threadId: Type.Optional(Type.String()),
     asVoice: Type.Optional(Type.Boolean()),
@@ -199,13 +219,13 @@ function buildSendSchema(options: { includePresentation: boolean; includeDeliver
     gifPlayback: Type.Optional(Type.Boolean()),
     forceDocument: Type.Optional(
       Type.Boolean({
-        description: "Send image/GIF as document to avoid Telegram compression (Telegram only).",
+        description: "Send image/GIF/video as document to avoid channel compression.",
       }),
     ),
     asDocument: Type.Optional(
       Type.Boolean({
         description:
-          "Send image/GIF as document to avoid Telegram compression. Alias for forceDocument (Telegram only).",
+          "Send image/GIF/video as document to avoid channel compression. Alias for forceDocument.",
       }),
     ),
   };
@@ -448,7 +468,12 @@ function buildPresenceSchema() {
 function buildChannelManagementSchema() {
   return {
     name: Type.Optional(Type.String()),
-    type: Type.Optional(Type.Number()),
+    channelType: Type.Optional(
+      Type.Number({
+        description:
+          "Numeric channel type (e.g. Discord channel type). Renamed from `type` to avoid JSON Schema keyword collisions that break some OpenAI-compatible providers (notably NVIDIA NIM).",
+      }),
+    ),
     parentId: Type.Optional(Type.String()),
     topic: Type.Optional(Type.String()),
     position: Type.Optional(Type.Number()),
@@ -546,6 +571,7 @@ type MessageToolOptions = {
   sandboxRoot?: string;
   requireExplicitTarget?: boolean;
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  inboundEventKind?: InboundEventKind;
   requesterSenderId?: string;
   senderIsOwner?: boolean;
 };
@@ -746,7 +772,7 @@ function appendMessageToolVisibleReplyHint(
   const targetGuidance = requireExplicitTarget
     ? "Include target when sending."
     : "The target defaults to the current source conversation, so omit target unless sending elsewhere.";
-  return `${description} For this turn, visible replies to the current source conversation must use action="send" with message. ${targetGuidance} Normal final answers are private and are not posted.`;
+  return `${description} For this turn, use action="send" with message for visible replies to the current source conversation. ${targetGuidance} Normal final answers stay private.`;
 }
 
 function appendMessageToolReadHint(
@@ -936,6 +962,7 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
         agentId: resolvedAgentId,
         sandboxRoot: options?.sandboxRoot,
         sourceReplyDeliveryMode: options?.sourceReplyDeliveryMode,
+        inboundEventKind: options?.inboundEventKind,
         abortSignal: signal,
       });
 

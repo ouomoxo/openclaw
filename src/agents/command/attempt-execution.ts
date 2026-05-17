@@ -10,6 +10,7 @@ import {
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { emitAgentEvent } from "../../infra/agent-events.js";
+import { readErrorName } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { annotateInterSessionPromptText } from "../../sessions/input-provenance.js";
 import { emitSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
@@ -21,7 +22,7 @@ import { resolveBootstrapWarningSignaturesSeen } from "../bootstrap-budget.js";
 import { runCliAgent } from "../cli-runner.js";
 import { getCliSessionBinding, setCliSessionBinding } from "../cli-session.js";
 import { FailoverError } from "../failover-error.js";
-import { resolveAgentHarnessPolicy } from "../harness/selection.js";
+import { resolveAvailableAgentHarnessPolicy } from "../harness/selection.js";
 import { resolveCliRuntimeExecutionProvider } from "../model-runtime-aliases.js";
 import { isCliProvider } from "../model-selection.js";
 import { resolveOpenAIRuntimeProviderForPi } from "../openai-codex-routing.js";
@@ -49,6 +50,20 @@ export {
 } from "./attempt-execution.helpers.js";
 
 const log = createSubsystemLogger("agents/agent-command");
+
+function shouldClearReusedCliSessionAfterError(err: unknown): boolean {
+  if (readErrorName(err) === "AbortError") {
+    return true;
+  }
+  return err instanceof FailoverError && err.reason !== "session_expired";
+}
+
+function resolveClearedCliSessionReason(err: unknown): string {
+  if (err instanceof FailoverError) {
+    return err.reason;
+  }
+  return readErrorName(err) || "error";
+}
 
 function normalizeTranscriptMirrorText(value: string): string {
   return value.trim().replace(/\s+/gu, " ");
@@ -103,19 +118,21 @@ type HarnessAuthProfileSelection = {
   authProfileId?: string;
   authProfileIdSource?: "auto" | "user";
   authProfileProvider: string;
+  authProfileMode?: string;
 };
 
-function resolveProfileProviderFromStore(params: {
-  agentDir: string;
-  profileId: string | undefined;
-}): string | undefined {
+function resolveProfileAuthFromStore(params: { agentDir: string; profileId: string | undefined }): {
+  provider?: string;
+  mode?: string;
+} {
   const profileId = params.profileId?.trim();
   if (!profileId) {
-    return undefined;
+    return {};
   }
-  return ensureAuthProfileStore(params.agentDir, {
+  const credential = ensureAuthProfileStore(params.agentDir, {
     allowKeychainPrompt: false,
-  }).profiles[profileId]?.provider;
+  }).profiles[profileId];
+  return { provider: credential?.provider, mode: credential?.type };
 }
 
 function resolveHarnessAuthProfileSelection(params: {
@@ -132,14 +149,15 @@ function resolveHarnessAuthProfileSelection(params: {
 }): HarnessAuthProfileSelection {
   const sessionAuthProfileId = params.sessionAuthProfileId?.trim();
   if (sessionAuthProfileId) {
+    const profileAuth = resolveProfileAuthFromStore({
+      agentDir: params.agentDir,
+      profileId: sessionAuthProfileId,
+    });
     return {
       authProfileId: sessionAuthProfileId,
       authProfileIdSource: params.sessionAuthProfileSource,
-      authProfileProvider:
-        resolveProfileProviderFromStore({
-          agentDir: params.agentDir,
-          profileId: sessionAuthProfileId,
-        }) ?? params.authProfileProvider,
+      authProfileProvider: profileAuth.provider ?? params.authProfileProvider,
+      authProfileMode: profileAuth.mode,
     };
   }
 
@@ -420,7 +438,7 @@ export function runAgentAttempt(params: {
       }) ?? params.providerOverride);
   const agentHarnessPolicy = isRawModelRun
     ? ({ runtime: "pi" } as const)
-    : resolveAgentHarnessPolicy({
+    : resolveAvailableAgentHarnessPolicy({
         provider: params.providerOverride,
         modelId: params.modelOverride,
         config: params.cfg,
@@ -442,6 +460,7 @@ export function runAgentAttempt(params: {
   const runtimeAuthPlan = buildAgentRuntimeAuthPlan({
     provider: params.providerOverride,
     authProfileProvider: harnessAuthSelection.authProfileProvider,
+    authProfileMode: harnessAuthSelection.authProfileMode,
     sessionAuthProfileId: harnessAuthSelection.authProfileId,
     config: params.cfg,
     workspaceDir: params.workspaceDir,
@@ -459,6 +478,11 @@ export function runAgentAttempt(params: {
     config: params.cfg,
     workspaceDir: params.workspaceDir,
   });
+  const embeddedPiHarnessOverride =
+    requestedAgentHarnessId ??
+    (agentHarnessPolicy.runtime === "pi" && embeddedPiProvider !== params.providerOverride
+      ? "pi"
+      : undefined);
   if (!isRawModelRun && isCliProvider(cliExecutionProvider, params.cfg)) {
     const cliSessionBinding = getCliSessionBinding(params.sessionEntry, cliExecutionProvider);
     const resolveReusableCliSessionBinding = async () => {
@@ -578,6 +602,26 @@ export function runAgentAttempt(params: {
             return result;
           });
         }
+        if (
+          isClaudeCliProvider(cliExecutionProvider) &&
+          shouldClearReusedCliSessionAfterError(err) &&
+          activeCliSessionBinding?.sessionId &&
+          params.sessionKey &&
+          params.sessionStore &&
+          params.storePath
+        ) {
+          log.warn(
+            `CLI session cleared after failed reused turn: provider=${sanitizeForLog(cliExecutionProvider)} sessionKey=${params.sessionKey} reason=${sanitizeForLog(resolveClearedCliSessionReason(err))}`,
+          );
+
+          params.sessionEntry =
+            (await clearCliSessionInStore({
+              provider: cliExecutionProvider,
+              sessionKey: params.sessionKey,
+              sessionStore: params.sessionStore,
+              storePath: params.storePath,
+            })) ?? params.sessionEntry;
+        }
         throw err;
       }
     });
@@ -605,7 +649,8 @@ export function runAgentAttempt(params: {
     sessionFile: params.sessionFile,
     workspaceDir: params.workspaceDir,
     config: params.cfg,
-    agentHarnessId: requestedAgentHarnessId,
+    agentHarnessId: embeddedPiHarnessOverride,
+    agentHarnessRuntimeOverride: embeddedPiHarnessOverride,
     skillsSnapshot: params.skillsSnapshot,
     prompt: effectivePrompt,
     images: params.isFallbackRetry ? undefined : params.opts.images,
@@ -630,6 +675,7 @@ export function runAgentAttempt(params: {
     toolsAllow: params.opts.toolsAllow,
     internalEvents: params.opts.internalEvents,
     inputProvenance: params.opts.inputProvenance,
+    sourceReplyDeliveryMode: params.opts.sourceReplyDeliveryMode,
     streamParams: params.opts.streamParams,
     agentDir: params.agentDir,
     allowTransientCooldownProbe: params.allowTransientCooldownProbe,

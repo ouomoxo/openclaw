@@ -19,6 +19,7 @@ import {
   wrapToolWithBeforeToolCallHook,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import type { CodexDynamicToolsLoading } from "./config.js";
+import { invalidInlineImageText, sanitizeInlineImageDataUrl } from "./image-payload-sanitizer.js";
 import {
   type CodexDynamicToolCallOutputContentItem,
   type CodexDynamicToolCallParams,
@@ -375,10 +376,14 @@ function convertToolContent(
   if (content.type === "text") {
     return [{ type: "inputText", text: content.text }];
   }
+  const imageUrl = sanitizeInlineImageDataUrl(`data:${content.mimeType};base64,${content.data}`);
+  if (!imageUrl) {
+    return [{ type: "inputText", text: invalidInlineImageText("codex dynamic tool") }];
+  }
   return [
     {
       type: "inputImage",
-      imageUrl: `data:${content.mimeType};base64,${content.data}`,
+      imageUrl,
     },
   ];
 }
@@ -417,11 +422,32 @@ function readFirstString(record: Record<string, unknown>, keys: string[]): strin
 
 function collectMediaUrls(record: Record<string, unknown>): string[] {
   const urls: string[] = [];
-  for (const key of ["mediaUrl", "media_url", "imageUrl", "image_url"]) {
-    const value = record[key];
+  const pushMediaUrl = (value: unknown) => {
     if (typeof value === "string" && value.trim()) {
       urls.push(value.trim());
     }
+  };
+  const pushAttachment = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return;
+    }
+    const attachment = value as Record<string, unknown>;
+    for (const key of ["media", "mediaUrl", "path", "filePath", "fileUrl", "url"]) {
+      pushMediaUrl(attachment[key]);
+    }
+  };
+  for (const key of [
+    "media",
+    "mediaUrl",
+    "media_url",
+    "path",
+    "filePath",
+    "fileUrl",
+    "imageUrl",
+    "image_url",
+  ]) {
+    const value = record[key];
+    pushMediaUrl(value);
   }
   for (const key of ["mediaUrls", "media_urls", "imageUrls", "image_urls"]) {
     const value = record[key];
@@ -429,9 +455,13 @@ function collectMediaUrls(record: Record<string, unknown>): string[] {
       continue;
     }
     for (const entry of value) {
-      if (typeof entry === "string" && entry.trim()) {
-        urls.push(entry.trim());
-      }
+      pushMediaUrl(entry);
+    }
+  }
+  const attachments = record.attachments;
+  if (Array.isArray(attachments)) {
+    for (const attachment of attachments) {
+      pushAttachment(attachment);
     }
   }
   return urls;
