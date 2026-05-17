@@ -307,6 +307,20 @@ function normalizeConfigMutationExplicitSetPaths(params: {
     if (!isRecord(previousChannel) && isRecord(nextChannel) && nextChannel.enabled !== false) {
       addUniqueExplicitSetPath(result, seen, ["channels", channelId]);
     }
+    if (path.length < 5 || path[2] !== "accounts") {
+      continue;
+    }
+    const accountId = path[3];
+    if (!accountId || !isRecord(nextChannel)) {
+      continue;
+    }
+    const previousAccounts = isRecord(previousChannel) ? previousChannel.accounts : undefined;
+    const nextAccounts = nextChannel.accounts;
+    const previousAccount = isRecord(previousAccounts) ? previousAccounts[accountId] : undefined;
+    const nextAccount = isRecord(nextAccounts) ? nextAccounts[accountId] : undefined;
+    if (!isRecord(previousAccount) && isRecord(nextAccount) && nextAccount.enabled !== false) {
+      addUniqueExplicitSetPath(result, seen, ["channels", channelId, "accounts", accountId]);
+    }
   }
   return result;
 }

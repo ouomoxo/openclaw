@@ -440,6 +440,31 @@ describe("config cli", () => {
       ]);
     });
 
+    it("marks account leaf writes as explicit account activation when creating an account", async () => {
+      const config: OpenClawConfig = {
+        channels: {
+          telegram: {
+            enabled: true,
+            accounts: {},
+          },
+        },
+      };
+      setSnapshot(config, withRuntimeDefaults(config));
+
+      await runConfigCommand([
+        "config",
+        "set",
+        "channels.telegram.accounts.work.botToken",
+        "tok-abc",
+      ]);
+
+      expect(mockWriteConfigFile).toHaveBeenCalledTimes(1);
+      expect(requireWriteOptions().explicitSetPaths).toEqual([
+        ["channels", "telegram", "accounts", "work", "botToken"],
+        ["channels", "telegram", "accounts", "work"],
+      ]);
+    });
+
     it("marks object set paths explicit so nested default-equal writes persist", async () => {
       const resolved: OpenClawConfig = {
         channels: {
