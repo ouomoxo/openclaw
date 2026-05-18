@@ -157,10 +157,14 @@ function parsePositiveIntegerOption(
   raw: string | undefined,
   fallback: number | undefined,
 ): number | undefined {
-  if (!raw) {
+  if (raw === undefined) {
     return fallback;
   }
-  const value = Number(raw);
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  const value = Number(trimmed);
   return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
