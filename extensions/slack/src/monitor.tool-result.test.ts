@@ -523,6 +523,9 @@ describe("monitorSlackProvider tool results", () => {
       messages: {
         ackReaction: "👀",
         ackReactionScope: "all",
+        groupChat: {
+          unmentionedInbound: "room_event",
+        },
         statusReactions: {
           enabled: true,
           timing: { debounceMs: 0, doneHoldMs: 0, errorHoldMs: 0 },

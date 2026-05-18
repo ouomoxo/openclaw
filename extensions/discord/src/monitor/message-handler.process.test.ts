@@ -1262,6 +1262,14 @@ describe("processDiscordMessage session routing", () => {
       shouldRequireMention: false,
       effectiveWasMentioned: false,
       discordConfig: { streaming: "partial", blockStreaming: true },
+      cfg: {
+        messages: {
+          groupChat: {
+            visibleReplies: "message_tool",
+          },
+        },
+        session: { store: "/tmp/openclaw-discord-process-test-sessions.json" },
+      },
       route: BASE_CHANNEL_ROUTE,
     });
 
@@ -1283,6 +1291,9 @@ describe("processDiscordMessage session routing", () => {
         messages: {
           ackReaction: "👀",
           ackReactionScope: "all",
+          groupChat: {
+            visibleReplies: "message_tool",
+          },
           statusReactions: {
             timing: { debounceMs: 0 },
           },
@@ -1314,6 +1325,9 @@ describe("processDiscordMessage session routing", () => {
         messages: {
           ackReaction: "👀",
           ackReactionScope: "all",
+          groupChat: {
+            visibleReplies: "message_tool",
+          },
           statusReactions: {
             enabled: true,
             timing: { debounceMs: 0 },
@@ -1500,7 +1514,7 @@ describe("processDiscordMessage session routing", () => {
     });
   });
 
-  it("defaults guild replies to message-tool-only source delivery", async () => {
+  it("resolves guild source reply delivery policy", async () => {
     await runProcessDiscordMessage(
       await createBaseContext({
         shouldRequireMention: true,
@@ -1508,7 +1522,7 @@ describe("processDiscordMessage session routing", () => {
         route: BASE_CHANNEL_ROUTE,
       }),
     );
-    expect(getLastDispatchReplyOptions()?.sourceReplyDeliveryMode).toBe("message_tool_only");
+    expect(getLastDispatchReplyOptions()?.sourceReplyDeliveryMode).toBe("automatic");
 
     dispatchInboundMessage.mockClear();
     await runProcessDiscordMessage(
@@ -1527,6 +1541,24 @@ describe("processDiscordMessage session routing", () => {
       }),
     );
     expect(getLastDispatchReplyOptions()?.sourceReplyDeliveryMode).toBe("automatic");
+
+    dispatchInboundMessage.mockClear();
+    await runProcessDiscordMessage(
+      await createBaseContext({
+        shouldRequireMention: false,
+        effectiveWasMentioned: false,
+        cfg: {
+          messages: {
+            groupChat: {
+              visibleReplies: "message_tool",
+            },
+          },
+          session: { store: "/tmp/openclaw-discord-process-test-sessions.json" },
+        },
+        route: BASE_CHANNEL_ROUTE,
+      }),
+    );
+    expect(getLastDispatchReplyOptions()?.sourceReplyDeliveryMode).toBe("message_tool_only");
 
     dispatchInboundMessage.mockClear();
     await runProcessDiscordMessage(
@@ -1753,6 +1785,11 @@ describe("processDiscordMessage draft streaming", () => {
 
     const ctx = await createBaseContext({
       cfg: {
+        messages: {
+          groupChat: {
+            visibleReplies: "message_tool",
+          },
+        },
         tools: { profile: "coding" },
         session: { store: "/tmp/openclaw-discord-process-test-sessions.json" },
       },

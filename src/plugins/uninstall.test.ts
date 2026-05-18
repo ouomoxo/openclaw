@@ -1246,9 +1246,14 @@ describe("uninstallPlugin", () => {
       },
     });
 
-    expect(applied).toEqual({ directoryRemoved: false, warnings: [] });
+    expect(applied).toEqual({
+      directoryRemoved: false,
+      warnings: [
+        `Skipping openclaw peerDependency link because ${peerLink} already exists and is not a symlink.`,
+      ],
+    });
     expectNpmUninstallCommand({ packageName: "missing-plugin", npmRoot });
-    await expect(fs.lstat(peerLink).then((stat) => stat.isSymbolicLink())).resolves.toBe(true);
+    await expect(fs.lstat(peerLink).then((stat) => stat.isDirectory())).resolves.toBe(true);
   });
 
   it("removes stale npm install config when the managed npm root is already absent", async () => {
