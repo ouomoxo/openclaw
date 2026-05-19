@@ -4,6 +4,10 @@ Docs: https://docs.openclaw.ai
 
 ## Unreleased
 
+### Changes
+
+- Contributor PR template now prompts for Motivation before the summary checklist so authors explain why a change should exist first. (#83939) Thanks @Takhoffman.
+
 ### Fixes
 
 - WhatsApp: drain pending outbound deliveries on a 30s periodic timer in addition to the reconnect handler, so messages enqueued while the provider is already connected no longer wait for the next reconnect to send. (#79083) Thanks @Oviemudiaga.
