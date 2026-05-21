@@ -1179,13 +1179,13 @@ describe("gateway server chat", () => {
           typeof row === "object" &&
           (row as { key?: unknown }).key === "agent:main:main",
       );
-      expectRecordFields(session, {
+      const sessionRecord = expectRecordFields(session, {
         status: "failed",
         hasActiveRun: false,
       });
-      expect(typeof session.startedAt).toBe("number");
-      expect(typeof session.endedAt).toBe("number");
-      expect(typeof session.runtimeMs).toBe("number");
+      expect(typeof sessionRecord.startedAt).toBe("number");
+      expect(typeof sessionRecord.endedAt).toBe("number");
+      expect(typeof sessionRecord.runtimeMs).toBe("number");
     });
   });
 

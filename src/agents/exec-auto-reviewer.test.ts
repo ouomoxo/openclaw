@@ -162,7 +162,7 @@ describe("createModelExecAutoReviewer", () => {
       });
 
       let settled = false;
-      const result = reviewer(input).then((decision) => {
+      const result = Promise.resolve(reviewer(input)).then((decision) => {
         settled = true;
         return decision;
       });
