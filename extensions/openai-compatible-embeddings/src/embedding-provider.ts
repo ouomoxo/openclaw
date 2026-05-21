@@ -2,6 +2,7 @@ import type {
   EmbeddingInput,
   EmbeddingProvider,
   EmbeddingProviderAdapter,
+  EmbeddingProviderCallOptions,
   EmbeddingProviderCreateOptions,
 } from "openclaw/plugin-sdk/embedding-providers";
 import { normalizeResolvedSecretInputString } from "openclaw/plugin-sdk/secret-input";
@@ -19,6 +20,9 @@ export type OpenAICompatibleEmbeddingClient = {
   ssrfPolicy?: SsrFPolicy;
   model: string;
   dimensions?: number;
+  inputType?: string;
+  queryInputType?: string;
+  documentInputType?: string;
 };
 
 type OpenAICompatibleEmbeddingResponse = {
@@ -53,6 +57,24 @@ function normalizeDimensions(value: number | undefined): number | undefined {
     throw new Error("openai-compatible embeddings: dimensions must be a positive integer.");
   }
   return value;
+}
+
+function normalizeOptionalInputType(value: string | undefined): string | undefined {
+  const inputType = value?.trim();
+  return inputType ? inputType : undefined;
+}
+
+function resolveRequestInputType(
+  client: OpenAICompatibleEmbeddingClient,
+  kind: EmbeddingProviderCallOptions["inputType"] | undefined,
+): string | undefined {
+  if (kind === "query") {
+    return client.queryInputType ?? client.inputType;
+  }
+  if (kind === "document") {
+    return client.documentInputType ?? client.inputType;
+  }
+  return client.inputType;
 }
 
 function normalizeHeaderName(name: string): string {
@@ -164,12 +186,15 @@ async function postEmbeddingRequest(params: {
   client: OpenAICompatibleEmbeddingClient;
   input: string[];
   signal?: AbortSignal;
+  inputType?: EmbeddingProviderCallOptions["inputType"];
 }): Promise<number[][]> {
   const { client, input } = params;
+  const inputType = resolveRequestInputType(client, params.inputType);
   const body = {
     model: client.model,
     input,
     ...(typeof client.dimensions === "number" ? { dimensions: client.dimensions } : {}),
+    ...(inputType ? { input_type: inputType } : {}),
   };
   const { response, release } = await fetchWithSsrFGuard({
     url: `${client.baseUrl}/embeddings`,
@@ -206,6 +231,9 @@ export function createOpenAICompatibleEmbeddingClient(
     value: options.remote?.apiKey,
     path: "embeddingProviders.openai-compatible.remote.apiKey",
   })?.trim();
+  const inputType = normalizeOptionalInputType(options.inputType);
+  const queryInputType = normalizeOptionalInputType(options.queryInputType);
+  const documentInputType = normalizeOptionalInputType(options.documentInputType);
   return {
     baseUrl,
     headers: buildHeaders({ apiKey, extra: options.remote?.headers }),
@@ -214,6 +242,9 @@ export function createOpenAICompatibleEmbeddingClient(
     ...(options.dimensions !== undefined
       ? { dimensions: normalizeDimensions(options.dimensions) }
       : {}),
+    ...(inputType ? { inputType } : {}),
+    ...(queryInputType ? { queryInputType } : {}),
+    ...(documentInputType ? { documentInputType } : {}),
   };
 }
 
@@ -230,6 +261,7 @@ export function createOpenAICompatibleEmbeddingProvider(options: EmbeddingProvid
       client,
       input: inputs.map(embeddingInputToText),
       signal: callOptions?.signal,
+      inputType: callOptions?.inputType,
     });
   };
   return {
@@ -266,6 +298,9 @@ export const openAICompatibleEmbeddingProviderAdapter: EmbeddingProviderAdapter 
           baseUrl: client.baseUrl,
           model: client.model,
           ...(typeof client.dimensions === "number" ? { dimensions: client.dimensions } : {}),
+          ...(client.inputType ? { inputType: client.inputType } : {}),
+          ...(client.queryInputType ? { queryInputType: client.queryInputType } : {}),
+          ...(client.documentInputType ? { documentInputType: client.documentInputType } : {}),
           ...(cacheHeaders ? { headers: cacheHeaders } : {}),
         },
       },

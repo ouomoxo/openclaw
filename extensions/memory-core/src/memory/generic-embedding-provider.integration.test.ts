@@ -127,6 +127,9 @@ function createMemoryEmbeddingOptions(overrides?: {
     provider: overrides?.provider ?? "openai-compatible",
     fallback: "none",
     model: overrides?.model ?? "text-embedding-bge-m3",
+    inputType: "default",
+    queryInputType: "query",
+    documentInputType: "document",
     remote: {
       baseUrl: overrides?.baseUrl,
       apiKey: "fixture-token",
@@ -193,6 +196,9 @@ describe("memory-core generic embedding provider bridge", () => {
         baseUrl: server.baseUrl,
         model: "text-embedding-bge-m3",
         dimensions: 3,
+        inputType: "default",
+        queryInputType: "query",
+        documentInputType: "document",
         headers: {
           accept: "application/json",
           "content-type": "application/json",
@@ -230,6 +236,7 @@ describe("memory-core generic embedding provider bridge", () => {
         model: "text-embedding-bge-m3",
         input: ["hello"],
         dimensions: 3,
+        input_type: "query",
       },
     });
     expect(server.requests[0]?.body).not.toHaveProperty("encoding_format");
@@ -240,11 +247,13 @@ describe("memory-core generic embedding provider bridge", () => {
       model: "text-embedding-bge-m3",
       input: ["a", "abcd"],
       dimensions: 3,
+      input_type: "document",
     });
     expect(server.requests[2]?.body).toEqual({
       model: "text-embedding-bge-m3",
       input: ["xy"],
       dimensions: 3,
+      input_type: "document",
     });
   });
 

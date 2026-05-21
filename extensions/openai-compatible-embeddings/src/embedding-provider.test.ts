@@ -242,6 +242,7 @@ describe("openai-compatible generic embedding provider", () => {
       },
     });
     expect(server.requests[0]?.body).not.toHaveProperty("encoding_format");
+    expect(server.requests[0]?.body).not.toHaveProperty("input_type");
     expect(server.requests[0]?.headers["content-type"]).toContain("application/json");
     expect(server.requests[0]?.headers.accept).toBe("application/json");
     expect(server.requests[0]?.headers["x-local-runtime"]).toBe("ollama");
@@ -250,6 +251,58 @@ describe("openai-compatible generic embedding provider", () => {
       input: ["a", "abcd"],
       dimensions: 1024,
     });
+  });
+
+  it("maps configured memory input_type labels onto query and document requests", async () => {
+    const server = await startEmbeddingServer({
+      respond: ({ body }) => {
+        const input = body.input;
+        const texts = Array.isArray(input) ? input : [input];
+        return {
+          object: "list",
+          data: texts.map((text, index) => ({
+            object: "embedding",
+            embedding: [String(text).length, index + 0.25, 1],
+            index,
+          })),
+          model: String(body.model),
+        };
+      },
+    });
+
+    const result = await openAICompatibleEmbeddingProviderAdapter.create(
+      createOptions({
+        model: "text-embedding-bge-m3",
+        inputType: "  default  ",
+        queryInputType: "  query  ",
+        documentInputType: "  document  ",
+        remote: { baseUrl: server.baseUrl },
+      }),
+    );
+    const provider = result.provider;
+    if (!provider) {
+      throw new Error("expected openai-compatible provider");
+    }
+
+    expect(result.runtime?.cacheKeyData).toMatchObject({
+      inputType: "default",
+      queryInputType: "query",
+      documentInputType: "document",
+    });
+
+    await expect(provider.embed("hello", { inputType: "query" })).resolves.toEqual([5, 0.25, 1]);
+    await expect(provider.embedBatch(["doc"], { inputType: "document" })).resolves.toEqual([
+      [3, 0.25, 1],
+    ]);
+    await expect(provider.embed("semantic", { inputType: "semantic" })).resolves.toEqual([
+      8, 0.25, 1,
+    ]);
+
+    expect(server.requests.map((request) => request.body.input_type)).toEqual([
+      "query",
+      "document",
+      "default",
+    ]);
   });
 
   it("omits Authorization when no apiKey is configured", async () => {
