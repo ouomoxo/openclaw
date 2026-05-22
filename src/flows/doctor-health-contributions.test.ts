@@ -7,6 +7,14 @@ import {
 } from "./doctor-health-contributions.js";
 
 const mocks = vi.hoisted(() => ({
+  registerCoreHealthChecks: vi.fn(),
+  registerBundledHealthChecks: vi.fn(),
+  runDoctorHealthRepairs: vi.fn(),
+  listHealthChecks: vi.fn(),
+  resolveAgentWorkspaceDir: vi.fn(() => "/tmp/fake-workspace"),
+  resolveDefaultAgentId: vi.fn(() => "main"),
+  detectLegacyStateMigrations: vi.fn(),
+  runLegacyStateMigrations: vi.fn(),
   maybeRunConfiguredPluginInstallReleaseStep: vi.fn(),
   note: vi.fn(),
   replaceConfigFile: vi.fn().mockResolvedValue(undefined),
@@ -20,6 +28,32 @@ const mocks = vi.hoisted(() => ({
   logConfigUpdated: vi.fn(),
   shortenHomePath: vi.fn((p: string) => p),
   formatCliCommand: vi.fn((cmd: string) => cmd),
+}));
+
+vi.mock("./doctor-core-checks.js", () => ({
+  registerCoreHealthChecks: mocks.registerCoreHealthChecks,
+}));
+
+vi.mock("./bundled-health-checks.js", () => ({
+  registerBundledHealthChecks: mocks.registerBundledHealthChecks,
+}));
+
+vi.mock("./doctor-repair-flow.js", () => ({
+  runDoctorHealthRepairs: mocks.runDoctorHealthRepairs,
+}));
+
+vi.mock("./health-check-registry.js", () => ({
+  listHealthChecks: mocks.listHealthChecks,
+}));
+
+vi.mock("../agents/agent-scope.js", () => ({
+  resolveAgentWorkspaceDir: mocks.resolveAgentWorkspaceDir,
+  resolveDefaultAgentId: mocks.resolveDefaultAgentId,
+}));
+
+vi.mock("../commands/doctor-state-migrations.js", () => ({
+  detectLegacyStateMigrations: mocks.detectLegacyStateMigrations,
+  runLegacyStateMigrations: mocks.runLegacyStateMigrations,
 }));
 
 vi.mock("../commands/doctor/shared/release-configured-plugin-installs.js", () => ({
@@ -85,6 +119,24 @@ function buildDoctorPrompter(shouldRepair: boolean): DoctorPrompter {
 
 describe("doctor health contributions", () => {
   beforeEach(() => {
+    mocks.detectLegacyStateMigrations.mockReset();
+    mocks.detectLegacyStateMigrations.mockResolvedValue({ preview: [] });
+    mocks.runLegacyStateMigrations.mockReset();
+    mocks.runLegacyStateMigrations.mockResolvedValue({ changes: [], warnings: [] });
+    mocks.registerCoreHealthChecks.mockReset();
+    mocks.registerBundledHealthChecks.mockReset();
+    mocks.runDoctorHealthRepairs.mockReset();
+    mocks.runDoctorHealthRepairs.mockResolvedValue({
+      config: {},
+      changes: [],
+      warnings: [],
+    });
+    mocks.listHealthChecks.mockReset();
+    mocks.listHealthChecks.mockReturnValue([]);
+    mocks.resolveAgentWorkspaceDir.mockReset();
+    mocks.resolveAgentWorkspaceDir.mockReturnValue("/tmp/fake-workspace");
+    mocks.resolveDefaultAgentId.mockReset();
+    mocks.resolveDefaultAgentId.mockReturnValue("main");
     mocks.maybeRunConfiguredPluginInstallReleaseStep.mockReset();
     mocks.note.mockReset();
     mocks.readConfigFileSnapshot.mockReset();
@@ -109,6 +161,27 @@ describe("doctor health contributions", () => {
       ids.indexOf("doctor:plugin-registry"),
     );
     expect(ids.indexOf("doctor:plugin-registry")).toBeLessThan(ids.indexOf("doctor:write-config"));
+  });
+
+  it("skips legacy state setup probes during deferred package update doctors", async () => {
+    const contribution = requireDoctorContribution("doctor:legacy-state");
+    const ctx = {
+      cfg: {},
+      configResult: { cfg: {} },
+      sourceConfigValid: true,
+      prompter: buildDoctorPrompter(true),
+      options: { nonInteractive: true },
+      env: {
+        OPENCLAW_UPDATE_IN_PROGRESS: "1",
+        OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR: "1",
+        OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE: "1",
+      },
+    } as Parameters<(typeof contribution)["run"]>[0];
+
+    await contribution.run(ctx);
+
+    expect(mocks.detectLegacyStateMigrations).not.toHaveBeenCalled();
+    expect(mocks.runLegacyStateMigrations).not.toHaveBeenCalled();
   });
 
   it("keeps release configured plugin installs repair-only", async () => {
@@ -207,6 +280,39 @@ describe("doctor health contributions", () => {
     );
     expect(ids.indexOf("doctor:structured-health-repairs")).toBeLessThan(
       ids.indexOf("doctor:write-config"),
+    );
+  });
+
+  it("skips legacy state structured repair checks during deferred package update doctors", async () => {
+    const contribution = requireDoctorContribution("doctor:structured-health-repairs");
+    const legacyStateCheck = { id: "core/doctor/legacy-state" };
+    const securityCheck = { id: "core/doctor/security" };
+    mocks.listHealthChecks.mockReturnValue([legacyStateCheck, securityCheck]);
+    const ctx = {
+      cfg: { plugins: {} },
+      configResult: { cfg: {} },
+      sourceConfigValid: true,
+      prompter: buildDoctorPrompter(true),
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+      options: {},
+      cfgForPersistence: {},
+      configPath: "/tmp/fake-openclaw.json",
+      env: {
+        OPENCLAW_UPDATE_IN_PROGRESS: "1",
+        OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR: "1",
+        OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE: "1",
+      },
+    } as Parameters<(typeof contribution)["run"]>[0];
+
+    await contribution.run(ctx);
+
+    expect(mocks.runDoctorHealthRepairs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cfg: { plugins: {} },
+        cwd: "/tmp/fake-workspace",
+        configPath: "/tmp/fake-openclaw.json",
+      }),
+      { checks: [securityCheck] },
     );
   });
 

@@ -3,6 +3,7 @@ import type { probeGatewayMemoryStatus } from "../commands/doctor-gateway-health
 import type { DoctorOptions, DoctorPrompter } from "../commands/doctor-prompter.js";
 import {
   isLegacyParentWritableUpdateDoctorPass,
+  shouldDeferConfiguredPluginInstallRepair,
   UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV,
 } from "../commands/doctor/shared/update-phase.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -49,6 +50,8 @@ type DoctorHealthContribution = FlowContribution & {
   healthCheckIds: readonly string[];
   run: (ctx: DoctorHealthFlowContext) => Promise<void>;
 };
+
+const LEGACY_STATE_HEALTH_CHECK_ID = "core/doctor/legacy-state";
 
 function isUpdateDoctorRun(env: NodeJS.ProcessEnv | Record<string, string | undefined>): boolean {
   const value = env.OPENCLAW_UPDATE_IN_PROGRESS;
@@ -251,13 +254,23 @@ async function runStructuredHealthRepairs(ctx: DoctorHealthFlowContext): Promise
   registerCoreHealthChecks();
   const workspaceDir = resolveAgentWorkspaceDir(ctx.cfg, resolveDefaultAgentId(ctx.cfg));
   registerBundledHealthChecks({ cfg: ctx.cfg, cwd: workspaceDir });
-  const result = await runDoctorHealthRepairs({
-    mode: "fix",
-    runtime: ctx.runtime,
-    cfg: ctx.cfg,
-    cwd: workspaceDir,
-    configPath: ctx.configPath,
-  });
+  const repairOptions = shouldDeferConfiguredPluginInstallRepair(ctx.env ?? process.env)
+    ? {
+        checks: (await import("./health-check-registry.js"))
+          .listHealthChecks()
+          .filter((check) => check.id !== LEGACY_STATE_HEALTH_CHECK_ID),
+      }
+    : {};
+  const result = await runDoctorHealthRepairs(
+    {
+      mode: "fix",
+      runtime: ctx.runtime,
+      cfg: ctx.cfg,
+      cwd: workspaceDir,
+      configPath: ctx.configPath,
+    },
+    repairOptions,
+  );
   ctx.cfg = result.config;
   if (result.changes.length > 0) {
     note(result.changes.join("\n"), "Doctor changes");
@@ -273,10 +286,16 @@ async function runClaudeCliHealth(ctx: DoctorHealthFlowContext): Promise<void> {
 }
 
 async function runLegacyStateHealth(ctx: DoctorHealthFlowContext): Promise<void> {
+  if (shouldDeferConfiguredPluginInstallRepair(ctx.env ?? process.env)) {
+    return;
+  }
   const { detectLegacyStateMigrations, runLegacyStateMigrations } =
     await import("../commands/doctor-state-migrations.js");
   const { note } = await import("../terminal/note.js");
-  const legacyState = await detectLegacyStateMigrations({ cfg: ctx.cfg });
+  const legacyState = await detectLegacyStateMigrations({
+    cfg: ctx.cfg,
+    env: ctx.env ?? process.env,
+  });
   if (legacyState.preview.length === 0) {
     return;
   }
