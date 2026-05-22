@@ -466,7 +466,9 @@ function restorePreUpdateAgentModelIntent(
   const topLevelAuthoredAgentsInclude = isSingleTopLevelInclude(preUpdateAuthoredAgents);
 
   const nextConfig = structuredClone(config);
-  const currentAgents = isRecord(nextConfig.agents) ? structuredClone(nextConfig.agents) : {};
+  const currentAgents: Record<string, unknown> = isRecord(nextConfig.agents)
+    ? structuredClone(nextConfig.agents)
+    : {};
   const originalAgents = structuredClone(currentAgents);
   let authoredAgents: Record<string, unknown> | undefined;
   const ensureAuthoredAgents = () => {

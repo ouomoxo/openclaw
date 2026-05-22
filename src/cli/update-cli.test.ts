@@ -4379,7 +4379,7 @@ describe("update-cli", () => {
       },
     );
 
-    const syncConfig = syncPluginCall()?.config as OpenClawConfig | undefined;
+    const syncConfig = syncPluginCall()?.config;
     const persistedConfig = lastReplaceConfigCall()?.nextConfig as OpenClawConfig | undefined;
     for (const config of [syncConfig, persistedConfig]) {
       expect(config?.agents?.defaults?.model).toEqual({
@@ -5041,7 +5041,7 @@ describe("update-cli", () => {
       },
     );
 
-    const syncConfig = syncPluginCall()?.config as OpenClawConfig | undefined;
+    const syncConfig = syncPluginCall()?.config;
     const persistedConfig = lastReplaceConfigCall()?.nextConfig as OpenClawConfig | undefined;
     expect(syncConfig?.plugins?.entries?.["lossless-claw"]?.config).toEqual({
       summaryModel: "openai/gpt-5.4-mini",
@@ -5174,7 +5174,7 @@ describe("update-cli", () => {
       },
     );
 
-    const syncConfig = syncPluginCall()?.config as OpenClawConfig | undefined;
+    const syncConfig = syncPluginCall()?.config;
     const persistedConfig = lastReplaceConfigCall()?.nextConfig as OpenClawConfig | undefined;
     expect(syncConfig?.agents?.defaults?.model).toEqual({
       primary: "openai/gpt-5.5",
