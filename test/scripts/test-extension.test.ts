@@ -606,6 +606,13 @@ describe("scripts/test-extension.mjs", () => {
     });
   });
 
+  it("accepts pnpm's leading argument separator before extension ids", () => {
+    expect(parseExtensionIds(["--", "telegram,slack", "--run"])).toEqual({
+      extensionIds: ["telegram", "slack"],
+      passthroughArgs: ["--run"],
+    });
+  });
+
   it("treats extensions without tests as a no-op by default", () => {
     const extensionId = findExtensionWithoutTests();
     const stdout = runScript([extensionId]);
