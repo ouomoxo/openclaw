@@ -680,7 +680,7 @@ async function compactEmbeddedAgentSessionDirectOnce(
       cfg: params.config,
       provider: resolveContextConfigProviderForRuntime({
         provider,
-        runtimeId: runtimeHarnessPolicy.runtime,
+        runtimeId: params.agentHarnessId ?? runtimeHarnessPolicy.runtime,
       }),
       modelId,
       modelContextTokens: readAgentModelContextTokens(runtimeModel),
