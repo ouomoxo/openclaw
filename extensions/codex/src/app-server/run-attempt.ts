@@ -1516,13 +1516,18 @@ export async function runCodexAppServerAttempt(
     timeoutMs: params.timeoutMs,
     timeoutFloorMs: options.startupTimeoutFloorMs,
   });
-  try {
-    emitCodexAppServerEvent(params, {
-      stream: "codex_app_server.lifecycle",
-      data: { phase: "startup" },
-    });
+  const buildNativeHookRelayFinalConfigPatch = (
+    decision: { action: "resume"; binding: CodexAppServerThreadBinding } | { action: "start" },
+  ) => {
+    nativeHookRelay?.unregister();
     nativeHookRelay = createCodexNativeHookRelay({
       options: options.nativeHookRelay,
+      generation:
+        decision.action === "resume" ? decision.binding.nativeHookRelayGeneration : undefined,
+      generationMismatchGraceMs:
+        decision.action === "resume" && !decision.binding.nativeHookRelayGeneration
+          ? CODEX_NATIVE_HOOK_RELAY_TTL_GRACE_MS
+          : undefined,
       events: nativeHookRelayEvents,
       agentId: sessionAgentId,
       sessionId: params.sessionId,
@@ -1535,15 +1540,24 @@ export async function runCodexAppServerAttempt(
       turnStartTimeoutMs: params.timeoutMs,
       signal: runAbortController.signal,
     });
-    const nativeHookRelayConfig = nativeHookRelay
-      ? buildCodexNativeHookRelayConfig({
-          relay: nativeHookRelay,
-          events: nativeHookRelayEvents,
-          hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
-        })
-      : options.nativeHookRelay?.enabled === false
-        ? buildCodexNativeHookRelayDisabledConfig()
-        : undefined;
+    return {
+      configPatch: nativeHookRelay
+        ? buildCodexNativeHookRelayConfig({
+            relay: nativeHookRelay,
+            events: nativeHookRelayEvents,
+            hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
+          })
+        : options.nativeHookRelay?.enabled === false
+          ? buildCodexNativeHookRelayDisabledConfig()
+          : undefined,
+      nativeHookRelayGeneration: nativeHookRelay?.generation,
+    };
+  };
+  try {
+    emitCodexAppServerEvent(params, {
+      stream: "codex_app_server.lifecycle",
+      data: { phase: "startup" },
+    });
     const threadConfig = mergeCodexThreadConfigs(
       bundleMcpThreadConfig?.configPatch as JsonObject | undefined,
     );
@@ -1696,7 +1710,7 @@ export async function runCodexAppServerAttempt(
                 appServer: pluginAppServer,
                 developerInstructions: promptBuild.developerInstructions,
                 config: threadConfig,
-                finalConfigPatch: nativeHookRelayConfig,
+                buildFinalConfigPatch: buildNativeHookRelayFinalConfigPatch,
                 nativeCodeModeEnabled: nativeToolSurfaceEnabled,
                 nativeCodeModeOnlyEnabled: appServer.codeModeOnly,
                 userMcpServersEnabled: nativeToolSurfaceEnabled,
@@ -3945,6 +3959,8 @@ function createCodexNativeHookRelay(params: {
         gatewayTimeoutMs?: number;
       }
     | undefined;
+  generation?: string;
+  generationMismatchGraceMs?: number;
   events: readonly NativeHookRelayEvent[];
   agentId: string | undefined;
   sessionId: string;
@@ -3967,6 +3983,10 @@ function createCodexNativeHookRelay(params: {
       sessionId: params.sessionId,
       sessionKey: params.sessionKey,
     }),
+    ...(params.generation ? { generation: params.generation } : {}),
+    ...(params.generationMismatchGraceMs
+      ? { generationMismatchGraceMs: params.generationMismatchGraceMs }
+      : {}),
     ...(params.agentId ? { agentId: params.agentId } : {}),
     sessionId: params.sessionId,
     ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
