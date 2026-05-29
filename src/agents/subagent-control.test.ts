@@ -1372,9 +1372,7 @@ describe("steerControlledSubagentRun", () => {
     });
 
     setSubagentControlDepsForTest({
-      callGateway: async <T = Record<string, unknown>>(
-        request: CallGatewayOptions,
-      ) => {
+      callGateway: async <T = Record<string, unknown>>(request: CallGatewayOptions) => {
         if (request.method === "agent.wait") {
           return {} as T;
         }
@@ -1418,5 +1416,68 @@ describe("steerControlledSubagentRun", () => {
       label: "yielded steer task",
       text: "steered yielded steer task.",
     });
+  });
+
+  it("preserves the current run timeout when steering a subagent restart", async () => {
+    const childSessionKey = "agent:main:subagent:timeout-steer-worker";
+    addSubagentRunForTests({
+      runId: "run-timeout-steer",
+      childSessionKey,
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout steer task",
+      cleanup: "keep",
+      runTimeoutSeconds: 45,
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+    });
+
+    const requests: CallGatewayOptions[] = [];
+    setSubagentControlDepsForTest({
+      callGateway: async <T = Record<string, unknown>>(request: CallGatewayOptions) => {
+        requests.push(request);
+        if (request.method === "agent.wait") {
+          return {} as T;
+        }
+        if (request.method === "agent") {
+          return { runId: "run-timeout-steer-followup" } as T;
+        }
+        throw new Error(`unexpected method: ${request.method}`);
+      },
+    });
+
+    const result = await steerControlledSubagentRun({
+      cfg: cfgWithSessionStore(),
+      controller: {
+        controllerSessionKey: "agent:main:main",
+        callerSessionKey: "agent:main:main",
+        callerIsSubagent: false,
+        controlScope: "children",
+      },
+      entry: {
+        runId: "run-timeout-steer",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        controllerSessionKey: "agent:main:main",
+        task: "timeout steer task",
+        cleanup: "keep",
+        runTimeoutSeconds: 45,
+        createdAt: Date.now() - 5_000,
+        startedAt: Date.now() - 4_000,
+      },
+      message: "updated direction",
+    });
+
+    expect(result.status).toBe("accepted");
+    const agentRequest = requests.find((request) => request.method === "agent");
+    expect(agentRequest?.params).toMatchObject({
+      sessionKey: childSessionKey,
+      timeout: 45,
+    });
+    const replacement = getSubagentRunByChildSessionKey(childSessionKey);
+    expect(replacement?.runId).toBe("run-timeout-steer-followup");
+    expect(replacement?.runTimeoutSeconds).toBe(45);
   });
 });

@@ -4,6 +4,7 @@ import { normalizeBlockedLivenessWaitStatus } from "../shared/agent-liveness.js"
 import { parseFiniteNumber } from "../shared/number-coercion.js";
 import { AGENT_RUN_ABORTED_ERROR, isAbortedAgentStopReason } from "./run-termination.js";
 import {
+  isHardAgentRunTimeoutPhase,
   normalizeAgentRunTimeoutPhase,
   normalizeProviderStarted,
   type AgentRunTimeoutPhase,
@@ -67,12 +68,19 @@ function normalizeAgentWaitResult(
 ): AgentWaitResult {
   const stopReason = typeof wait?.stopReason === "string" ? wait.stopReason : undefined;
   const abortedStopReason = isAbortedAgentStopReason(stopReason);
+  const timeoutPhase = normalizeAgentRunTimeoutPhase(wait?.timeoutPhase);
+  const hardRunTimeout = isHardAgentRunTimeoutPhase(timeoutPhase);
   const error =
-    abortedStopReason && typeof wait?.error !== "string" ? AGENT_RUN_ABORTED_ERROR : wait?.error;
+    abortedStopReason &&
+    !(status === "timeout" && hardRunTimeout) &&
+    typeof wait?.error !== "string"
+      ? AGENT_RUN_ABORTED_ERROR
+      : wait?.error;
   const normalized = normalizeBlockedLivenessWaitStatus({
-    status: abortedStopReason ? "error" : status,
+    status: abortedStopReason && !(status === "timeout" && hardRunTimeout) ? "error" : status,
     livenessState: wait?.livenessState,
     error,
+    preserveBlockedTimeout: hardRunTimeout,
   });
   return {
     status: normalized.status,
@@ -83,7 +91,7 @@ function normalizeAgentWaitResult(
     livenessState: typeof wait?.livenessState === "string" ? wait.livenessState : undefined,
     yielded: wait?.yielded === true ? true : undefined,
     pendingError: wait?.pendingError === true ? true : undefined,
-    timeoutPhase: normalizeAgentRunTimeoutPhase(wait?.timeoutPhase),
+    timeoutPhase,
     providerStarted: normalizeProviderStarted(wait?.providerStarted),
   };
 }

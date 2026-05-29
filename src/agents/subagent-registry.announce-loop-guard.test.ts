@@ -58,7 +58,8 @@ vi.mock("./subagent-registry.store.js", () => ({
   saveSubagentRegistryToDisk: mocks.saveSubagentRegistryToDisk,
 }));
 
-vi.mock("./timeout.js", () => ({
+vi.mock("./timeout.js", async () => ({
+  ...(await vi.importActual<typeof import("./timeout.js")>("./timeout.js")),
   resolveAgentTimeoutMs: mocks.resolveAgentTimeoutMs,
 }));
 

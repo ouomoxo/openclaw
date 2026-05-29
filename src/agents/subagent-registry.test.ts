@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { listTaskRecords, resetTaskRegistryForTests } from "../tasks/task-registry.js";
 
 const noop = () => {};
 const waitForFast = <T>(callback: () => T | Promise<T>) =>
@@ -156,7 +157,8 @@ vi.mock("../context-engine/registry.js", () => ({
   resolveContextEngine: mocks.resolveContextEngine,
 }));
 
-vi.mock("./timeout.js", () => ({
+vi.mock("./timeout.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./timeout.js")>()),
   resolveAgentTimeoutMs: mocks.resolveAgentTimeoutMs,
 }));
 
@@ -173,6 +175,7 @@ describe("subagent registry seam flow", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resetTaskRegistryForTests({ persist: false });
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-24T12:00:00Z"));
     mocks.onAgentEvent.mockReturnValue(noop);
@@ -229,6 +232,7 @@ describe("subagent registry seam flow", () => {
   afterEach(() => {
     mod.testing.setDepsForTest();
     mod.resetSubagentRegistryForTests({ persist: false });
+    resetTaskRegistryForTests({ persist: false });
     vi.useRealTimers();
   });
 
@@ -1741,12 +1745,16 @@ describe("subagent registry seam flow", () => {
   });
 
   it("records terminal agent.wait timeouts even before session store timing is persisted", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
     mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
       if (request.method === "agent.wait") {
         return {
           status: "timeout",
           startedAt: 111,
           endedAt: 222,
+          livenessState: "blocked",
+          timeoutPhase: "provider",
+          providerStarted: true,
           stopReason: "rpc",
         };
       }
@@ -1767,6 +1775,7 @@ describe("subagent registry seam flow", () => {
       requesterDisplayKey: "main",
       task: "time out terminally",
       cleanup: "keep",
+      runTimeoutSeconds: 8,
     });
 
     await waitForFast(() => {
@@ -1775,6 +1784,806 @@ describe("subagent registry seam flow", () => {
         .find((entry) => entry.runId === "run-terminal-timeout");
       expect(run?.endedAt).toBe(222);
       expectRecordFields(run?.outcome, { status: "timeout" }, "terminal timeout outcome");
+    });
+    const waitCall = mocks.callGateway.mock.calls.find(
+      ([request]) => (request as { method?: string }).method === "agent.wait",
+    )?.[0] as { params?: { timeoutMs?: number }; timeoutMs?: number } | undefined;
+    expect(waitCall?.params?.timeoutMs).toBe(23_000);
+    expect(waitCall?.timeoutMs).toBe(25_000);
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("records hard timeout-attributed agent.wait timeouts before ending metadata arrives", async () => {
+    let waitAttempts = 0;
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        waitAttempts += 1;
+        return {
+          status: "timeout",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        updatedAt: 1,
+        status: "running",
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-attributed-timeout",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "time out before session metadata flush",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-attributed-timeout");
+      expect(waitAttempts).toBe(1);
+      expect(run?.endedAt).toBeLessThan(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "attributed timeout outcome");
+    });
+    expect(mocks.scheduleOrphanRecovery).not.toHaveBeenCalled();
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses persisted child completion for hard agent.wait timeouts without endedAt", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "timeout",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        status: "done",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:07Z"),
+        updatedAt: Date.parse("2026-03-24T12:00:07Z"),
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-attributed-timeout-with-completion",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "finish before attributed timeout metadata",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-attributed-timeout-with-completion");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:07Z"));
+      expectRecordFields(run?.outcome, { status: "ok" }, "attributed completion outcome");
+    });
+    expect(mocks.scheduleOrphanRecovery).not.toHaveBeenCalled();
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not promote late child completions for hard agent.wait timeouts without endedAt", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        vi.setSystemTime(new Date("2026-03-24T12:00:08.100Z"));
+        return {
+          status: "timeout",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        status: "done",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:09Z"),
+        updatedAt: Date.parse("2026-03-24T12:00:09Z"),
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-hard-wait-timeout-late-child-completion",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "late child completion after hard wait timeout",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-hard-wait-timeout-late-child-completion");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "late hard wait timeout outcome");
+    });
+  });
+
+  it("uses the explicit run timeout as a fallback when wait and lifecycle stay pending", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await vi.advanceTimersByTimeAsync(22_999);
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "fallback timeout outcome");
+    });
+    expect(mocks.captureSubagentCompletionReply).not.toHaveBeenCalled();
+  });
+
+  it("keeps the explicit run timeout fallback authoritative over late agent.wait success", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    let resolveWait: (value: { status: "ok"; startedAt: number; endedAt: number }) => void;
+    const waitPromise = new Promise<{ status: "ok"; startedAt: number; endedAt: number }>(
+      (resolve) => {
+        resolveWait = resolve;
+      },
+    );
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return waitPromise;
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-late-success",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "late wait success must not overwrite timeout",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await vi.advanceTimersByTimeAsync(23_000);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-late-success");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "fallback timeout outcome");
+    });
+
+    resolveWait!({
+      status: "ok",
+      startedAt: Date.parse("2026-03-24T12:00:00Z"),
+      endedAt: Date.parse("2026-03-24T12:00:30Z"),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const run = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-timeout-fallback-late-success");
+    expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+    expectRecordFields(run?.outcome, { status: "timeout" }, "late wait preserved outcome");
+  });
+
+  it("keeps the explicit run timeout fallback after lifecycle starts without timing", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-start-untimed",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback after untimed start",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+    lifecycleHandler?.({
+      runId: "run-timeout-fallback-start-untimed",
+      stream: "lifecycle",
+      data: {
+        phase: "start",
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(22_999);
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-start-untimed");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "untimed start timeout outcome");
+    });
+    expect(mocks.captureSubagentCompletionReply).not.toHaveBeenCalled();
+  });
+
+  it("does not extend explicit run timeout fallback after a late lifecycle start", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-start-late",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback after late start",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+    lifecycleHandler?.({
+      runId: "run-timeout-fallback-start-late",
+      stream: "lifecycle",
+      data: {
+        phase: "start",
+        startedAt: Date.parse("2026-03-24T12:00:20Z"),
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(22_999);
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-start-late");
+      expect(run?.startedAt).toBe(Date.parse("2026-03-24T12:00:00Z"));
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "late start timeout outcome");
+    });
+    expect(mocks.captureSubagentCompletionReply).not.toHaveBeenCalled();
+  });
+
+  it("re-arms provisional explicit run timeout fallback from accepted start time", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-accepted-start",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback after accepted start",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(
+      mod.armSubagentRunTimeout({
+        runId: "run-timeout-fallback-accepted-start",
+        runTimeoutSeconds: 8,
+        startedAt: Date.parse("2026-03-24T12:00:05Z"),
+      }),
+    ).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(22_999);
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-accepted-start");
+      expect(run?.startedAt).toBe(Date.parse("2026-03-24T12:00:05Z"));
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:13Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "accepted start timeout outcome");
+    });
+  });
+
+  it("keeps explicit timeout fallback authoritative over late agent.wait success", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "ok",
+          startedAt: Date.parse("2026-03-24T12:00:09Z"),
+          endedAt: Date.parse("2026-03-24T12:00:09Z"),
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-late-wait-ok",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback after late wait success",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await vi.advanceTimersByTimeAsync(22_999);
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+    const pendingRun = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-timeout-fallback-late-wait-ok");
+    expect(pendingRun?.endedAt).toBeUndefined();
+    expect(pendingRun?.outcome).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-late-wait-ok");
+      expect(run?.startedAt).toBe(Date.parse("2026-03-24T12:00:00Z"));
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "late wait success timeout outcome");
+    });
+  });
+
+  it("lets earlier agent.wait success correct explicit timeout fallback after the response arrives late", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        await vi.advanceTimersByTimeAsync(23_000);
+        return {
+          status: "ok",
+          startedAt: Date.parse("2026-03-24T12:00:00Z"),
+          endedAt: Date.parse("2026-03-24T12:00:07Z"),
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-late-earlier-wait-ok",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback corrected by late earlier wait success",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-late-earlier-wait-ok");
+      expect(run?.startedAt).toBe(Date.parse("2026-03-24T12:00:00Z"));
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:07Z"));
+      expectRecordFields(run?.outcome, { status: "ok" }, "late earlier wait success outcome");
+    });
+  });
+
+  it("keeps explicit timeout authoritative over ambiguous agent.wait errors after the deadline", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        await vi.advanceTimersByTimeAsync(8_000);
+        return {
+          status: "error",
+          error: 'CommandLaneTaskTimeoutError: Command lane "subagent" task timed out',
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-late-wait-error",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback after late wait error",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-late-wait-error");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "late wait error timeout outcome");
+    });
+  });
+
+  it("keeps explicit timeout authoritative over ambiguous blocked lifecycle after the deadline", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-late-blocked-lifecycle",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback after late blocked lifecycle",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+    lifecycleHandler?.({
+      runId: "run-timeout-fallback-late-blocked-lifecycle",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        aborted: true,
+        endedAt: Date.parse("2026-03-24T12:00:08Z"),
+        livenessState: "blocked",
+        error: "request aborted",
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-late-blocked-lifecycle");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(
+        run?.outcome,
+        { status: "timeout" },
+        "late blocked lifecycle timeout outcome",
+      );
+    });
+  });
+
+  it("keeps explicit timeout fallback authoritative over untimed agent.wait success", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "ok",
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-untimed-wait-ok",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback after untimed wait success",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await vi.advanceTimersByTimeAsync(23_000);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-untimed-wait-ok");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(
+        run?.outcome,
+        { status: "timeout" },
+        "untimed wait success timeout outcome",
+      );
+    });
+  });
+
+  it("uses persisted child completion when explicit timeout fallback has no hard timeout evidence", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        status: "done",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:07Z"),
+        updatedAt: Date.parse("2026-03-24T12:00:07Z"),
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-done",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback done",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await vi.advanceTimersByTimeAsync(23_000);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-done");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:07Z"));
+      expectRecordFields(run?.outcome, { status: "ok" }, "fallback completion outcome");
+    });
+  });
+
+  it("does not promote child completions after the explicit run timeout deadline", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        vi.setSystemTime(new Date("2026-03-24T12:00:08.100Z"));
+        return {
+          status: "timeout",
+          timeoutPhase: "queue",
+        };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        status: "done",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:09Z"),
+        updatedAt: Date.parse("2026-03-24T12:00:09Z"),
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-late-child-completion",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "late child completion",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-late-child-completion");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "late completion timeout outcome");
+    });
+  });
+
+  it("keeps fallback session reconciliation after later hard timeout events", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        status: "done",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:07Z"),
+        updatedAt: Date.parse("2026-03-24T12:00:07Z"),
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-hard-event",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback with hard event",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    lifecycleHandler?.({
+      runId: "run-timeout-fallback-hard-event",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:08Z"),
+        aborted: true,
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(13_000);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-hard-event");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:07Z"));
+      expectRecordFields(run?.outcome, { status: "ok" }, "merged fallback completion outcome");
+    });
+  });
+
+  it("does not overflow large explicit run timeout fallback timers", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-large-timeout-fallback",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "large timeout fallback",
+      cleanup: "keep",
+      runTimeoutSeconds: 60 * 60 * 24 * 30,
+    });
+
+    await vi.advanceTimersByTimeAsync(1);
+    const run = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-large-timeout-fallback");
+    expect(run?.endedAt).toBeUndefined();
+    expect(run?.outcome).toBeUndefined();
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+  });
+
+  it("keeps hard agent.wait timeouts authoritative over reconstructed session failures", async () => {
+    const base = Date.parse("2026-03-24T12:00:00Z");
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "timeout",
+          startedAt: base + 111,
+          endedAt: base + 222,
+          timeoutPhase: "provider",
+          providerStarted: true,
+        };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        updatedAt: base + 223,
+        endedAt: base + 223,
+        status: "failed",
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-hard-timeout-session-failed",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "time out while session store records failure text",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-hard-timeout-session-failed");
+      expect(run?.endedAt).toBe(base + 222);
+      expectRecordFields(run?.outcome, { status: "timeout" }, "terminal timeout outcome");
+    });
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets earlier reconstructed session failures correct hard agent.wait timeouts", async () => {
+    const base = Date.parse("2026-03-24T12:00:00Z");
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "timeout",
+          startedAt: base + 111,
+          endedAt: base + 222,
+          timeoutPhase: "provider",
+          providerStarted: true,
+        };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        updatedAt: base + 200,
+        endedAt: base + 200,
+        status: "failed",
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-hard-timeout-earlier-session-failed",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "fail before timeout attribution",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-hard-timeout-earlier-session-failed");
+      expect(run?.endedAt).toBe(base + 200);
+      expectRecordFields(run?.outcome, { status: "error" }, "earlier failure outcome");
     });
     expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
   });
@@ -1968,6 +2777,7 @@ describe("subagent registry seam flow", () => {
       requesterDisplayKey: "main",
       task: "wait for child continuation",
       cleanup: "keep",
+      runTimeoutSeconds: 0,
     });
 
     await waitForFast(() => {
@@ -1979,6 +2789,14 @@ describe("subagent registry seam flow", () => {
     });
     expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
     expect(mod.countPendingDescendantRuns("agent:main:main")).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(23_000);
+    const yieldedRun = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-yield-paused");
+    expect(yieldedRun?.pauseReason).toBe("sessions_yield");
+    expect(yieldedRun?.outcome).toBeUndefined();
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
 
     expect(
       mod.replaceSubagentRunAfterSteer({
@@ -1992,6 +2810,220 @@ describe("subagent registry seam flow", () => {
     expect(replacement?.runId).toBe("run-yield-continuation");
     expect(replacement?.pauseReason).toBeUndefined();
     expect(replacement?.endedAt).toBeUndefined();
+  });
+
+  it("lets explicit run timeout fallback complete sessions_yield-paused subagent runs", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "ok",
+          startedAt: 111,
+          endedAt: 222,
+          stopReason: "end_turn",
+          livenessState: "paused",
+          yielded: true,
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-yield-paused-explicit-timeout",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "wait for child explicit timeout",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-yield-paused-explicit-timeout");
+      expect(run?.pauseReason).toBe("sessions_yield");
+      expect(run?.outcome).toBeUndefined();
+    });
+
+    await vi.advanceTimersByTimeAsync(23_000);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-yield-paused-explicit-timeout");
+      expect(run?.pauseReason).toBeUndefined();
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "paused fallback timeout outcome");
+    });
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets hard timeout lifecycle events complete sessions_yield-paused subagent runs", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "ok",
+          startedAt: 111,
+          endedAt: 222,
+          stopReason: "end_turn",
+          livenessState: "paused",
+          yielded: true,
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-yield-paused-timeout",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "wait for child timeout",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-yield-paused-timeout");
+      expect(run?.pauseReason).toBe("sessions_yield");
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-yield-paused-timeout",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: 111,
+        endedAt: 8_000,
+        livenessState: "blocked",
+        error: "Request timed out while waiting for tool execution to finish.",
+        timeoutPhase: "post_turn",
+        providerStarted: true,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-yield-paused-timeout");
+      expect(run?.pauseReason).toBeUndefined();
+      expect(run?.endedAt).toBe(8_000);
+      expectRecordFields(run?.outcome, { status: "timeout" }, "paused hard timeout outcome");
+    });
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let timeout waits with yielded metadata clear explicit run timeout fallback", async () => {
+    mocks.resolveAgentTimeoutMs.mockReturnValue(8_000);
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "timeout",
+          yielded: true,
+          stopReason: "end_turn",
+          livenessState: "paused",
+          timeoutPhase: "queue",
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-with-stale-yield",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout must beat stale yielded metadata",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    await vi.advanceTimersByTimeAsync(22_999);
+    const pending = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-timeout-with-stale-yield");
+    expect(pending?.pauseReason).toBeUndefined();
+    expect(pending?.outcome).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-with-stale-yield");
+      expect(run?.pauseReason).toBeUndefined();
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "stale yield timeout outcome");
+    });
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves inherited timeout fallback for replacement runs without explicit timeouts", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-replace-old-timeout",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "replace old timeout",
+      cleanup: "keep",
+      runTimeoutSeconds: 8,
+    });
+
+    expect(
+      mod.replaceSubagentRunAfterSteer({
+        previousRunId: "run-replace-old-timeout",
+        nextRunId: "run-replace-new-no-timeout",
+      }),
+    ).toBe(true);
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+    lifecycleHandler?.({
+      runId: "run-replace-new-no-timeout",
+      stream: "lifecycle",
+      data: {
+        phase: "start",
+        startedAt: Date.now(),
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(22_999);
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waitForFast(() => {
+      const replacement = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-replace-new-no-timeout");
+      expect(replacement?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(
+        replacement?.outcome,
+        { status: "timeout" },
+        "replacement inherited timeout outcome",
+      );
+      expect(replacement?.runTimeoutSeconds).toBe(8);
+    });
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
   });
 
   it("announces blocked agent.wait snapshots as errors instead of success", async () => {
@@ -2092,6 +3124,107 @@ describe("subagent registry seam flow", () => {
       .listSubagentRunsForRequester("agent:main:main")
       .find((entry) => entry.runId === "run-aborted-wait");
     expect(run?.endedReason).toBe("subagent-killed");
+    expect(run?.outcome?.status).toBe("error");
+  });
+
+  it("announces aborted agent.wait timeout snapshots without hard attribution as killed failures", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "timeout",
+          startedAt: 100,
+          endedAt: 250,
+          stopReason: "aborted",
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-aborted-timeout-wait",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "aborted timeout wait",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    });
+    const announceParams = expectRecordFields(
+      getMockCallArg(mocks.runSubagentAnnounceFlow, 0, 0, "aborted timeout wait announce"),
+      { childRunId: "run-aborted-timeout-wait" },
+      "aborted timeout wait announce params",
+    );
+    expectRecordFields(
+      announceParams.outcome,
+      {
+        status: "error",
+        error: "subagent run terminated",
+        startedAt: 100,
+        endedAt: 250,
+        elapsedMs: 150,
+      },
+      "aborted timeout wait announce outcome",
+    );
+
+    const run = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-aborted-timeout-wait");
+    expect(run?.endedReason).toBe("subagent-killed");
+    expect(run?.outcome?.status).toBe("error");
+  });
+
+  it("announces blocked agent.wait timeout snapshots without hard attribution as errors", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return {
+          status: "timeout",
+          startedAt: 100,
+          endedAt: 250,
+          livenessState: "blocked",
+          error: "Context overflow: prompt too large for the model.",
+        };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-blocked-timeout-wait",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "blocked timeout wait",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    });
+    const announceParams = expectRecordFields(
+      getMockCallArg(mocks.runSubagentAnnounceFlow, 0, 0, "blocked timeout wait announce"),
+      { childRunId: "run-blocked-timeout-wait" },
+      "blocked timeout wait announce params",
+    );
+    expectRecordFields(
+      announceParams.outcome,
+      {
+        status: "error",
+        error: "Context overflow: prompt too large for the model.",
+        startedAt: 100,
+        endedAt: 250,
+        elapsedMs: 150,
+      },
+      "blocked timeout wait announce outcome",
+    );
+
+    const run = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-blocked-timeout-wait");
+    expect(run?.endedReason).toBe("subagent-error");
     expect(run?.outcome?.status).toBe("error");
   });
 
@@ -2461,6 +3594,579 @@ describe("subagent registry seam flow", () => {
       .find((entry) => entry.runId === "run-blocked-end");
     expect(run?.endedReason).toBe("subagent-error");
     expect(run?.outcome?.status).toBe("error");
+  });
+
+  it("announces timeout-attributed lifecycle errors as timeouts", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-error",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout error task",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-timeout-error",
+      stream: "lifecycle",
+      data: {
+        phase: "start",
+        startedAt: 10,
+      },
+    });
+    lifecycleHandler?.({
+      runId: "run-timeout-error",
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        startedAt: 10,
+        endedAt: 20,
+        livenessState: "blocked",
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    });
+    const announceParams = expectRecordFields(
+      getMockCallArg(mocks.runSubagentAnnounceFlow, 0, 0, "timeout announce"),
+      { childRunId: "run-timeout-error" },
+      "timeout announce params",
+    );
+    expectRecordFields(
+      announceParams.outcome,
+      {
+        status: "timeout",
+        startedAt: 10,
+        endedAt: 20,
+        elapsedMs: 10,
+      },
+      "timeout announce outcome",
+    );
+
+    const run = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-timeout-error");
+    expect(run?.endedReason).toBe("subagent-complete");
+    expect(run?.outcome?.status).toBe("timeout");
+  });
+
+  it("keeps the first authoritative hard-timeout lifecycle event", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-duplicate-timeout-events",
+      childSessionKey: "agent:main:subagent:duplicate-timeout",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "duplicate timeout events",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-duplicate-timeout-events",
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        endedAt: 20,
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    });
+
+    lifecycleHandler?.({
+      runId: "run-duplicate-timeout-events",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        endedAt: 25,
+        livenessState: "blocked",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    const announceParams = expectRecordFields(
+      getMockCallArg(mocks.runSubagentAnnounceFlow, 0, 0, "duplicate timeout announce"),
+      { childRunId: "run-duplicate-timeout-events" },
+      "duplicate timeout announce params",
+    );
+    expectRecordFields(
+      announceParams.outcome,
+      {
+        status: "timeout",
+        endedAt: 20,
+      },
+      "duplicate timeout announce outcome",
+    );
+  });
+
+  it("announces blocked lifecycle ends with hard timeout attribution as timeouts", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-end",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout end task",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-timeout-end",
+      stream: "lifecycle",
+      data: {
+        phase: "start",
+        startedAt: 10,
+      },
+    });
+    lifecycleHandler?.({
+      runId: "run-timeout-end",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: 10,
+        endedAt: 20,
+        livenessState: "blocked",
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    });
+    const announceParams = expectRecordFields(
+      getMockCallArg(mocks.runSubagentAnnounceFlow, 0, 0, "timeout end announce"),
+      { childRunId: "run-timeout-end" },
+      "timeout end announce params",
+    );
+    expectRecordFields(
+      announceParams.outcome,
+      {
+        status: "timeout",
+        startedAt: 10,
+        endedAt: 20,
+        elapsedMs: 10,
+      },
+      "timeout end announce outcome",
+    );
+
+    const run = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-timeout-end");
+    expect(run?.endedReason).toBe("subagent-complete");
+    expect(run?.outcome?.status).toBe("timeout");
+  });
+
+  it("lets earlier session completion correct hard timeout lifecycle events", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        status: "done",
+        startedAt: 10,
+        endedAt: 18,
+        updatedAt: 18,
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-end-earlier-session-completion",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout end with earlier session completion",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-timeout-end-earlier-session-completion",
+      stream: "lifecycle",
+      data: {
+        phase: "start",
+        startedAt: 10,
+      },
+    });
+    lifecycleHandler?.({
+      runId: "run-timeout-end-earlier-session-completion",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: 10,
+        endedAt: 20,
+        livenessState: "blocked",
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-end-earlier-session-completion");
+      expect(run?.endedAt).toBe(18);
+      expectRecordFields(run?.outcome, { status: "ok" }, "hard timeout corrected outcome");
+    });
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let late session completion correct hard timeout lifecycle after explicit deadline", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+    mocks.loadSessionStore.mockReturnValue({
+      "agent:main:subagent:child": {
+        sessionId: "sess-child",
+        status: "done",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:09Z"),
+        updatedAt: Date.parse("2026-03-24T12:00:09Z"),
+      },
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-end-late-session-completion",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout end with late session completion",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+      runTimeoutSeconds: 8,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-timeout-end-late-session-completion",
+      stream: "lifecycle",
+      data: {
+        phase: "start",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+      },
+    });
+    lifecycleHandler?.({
+      runId: "run-timeout-end-late-session-completion",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:10Z"),
+        livenessState: "blocked",
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-end-late-session-completion");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:08Z"));
+      expectRecordFields(run?.outcome, { status: "timeout" }, "late lifecycle timeout outcome");
+    });
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps hard timeout lifecycle ends authoritative over later successful lifecycle ends", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-then-late-ok",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout then late ok task",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-timeout-then-late-ok",
+      stream: "lifecycle",
+      data: {
+        phase: "start",
+        startedAt: 10,
+      },
+    });
+    lifecycleHandler?.({
+      runId: "run-timeout-then-late-ok",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: 10,
+        endedAt: 20,
+        aborted: true,
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+    lifecycleHandler?.({
+      runId: "run-timeout-then-late-ok",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: 10,
+        endedAt: 30,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    });
+    const announceParams = expectRecordFields(
+      getMockCallArg(mocks.runSubagentAnnounceFlow, 0, 0, "late ok timeout announce"),
+      { childRunId: "run-timeout-then-late-ok" },
+      "late ok timeout announce params",
+    );
+    expectRecordFields(
+      announceParams.outcome,
+      {
+        status: "timeout",
+        startedAt: 10,
+        endedAt: 20,
+        elapsedMs: 10,
+      },
+      "late ok timeout announce outcome",
+    );
+
+    const run = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-timeout-then-late-ok");
+    expect(run?.endedReason).toBe("subagent-complete");
+    expect(run?.outcome?.status).toBe("timeout");
+  });
+
+  it("does not let transient aborted lifecycle ends shorten explicit timeout fallback", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-fallback-transient-abort",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout fallback transient abort task",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+      runTimeoutSeconds: 8,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-timeout-fallback-transient-abort",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:05Z"),
+        aborted: true,
+      },
+    });
+    lifecycleHandler?.({
+      runId: "run-timeout-fallback-transient-abort",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:06Z"),
+      },
+    });
+
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === "run-timeout-fallback-transient-abort");
+      expect(run?.endedAt).toBe(Date.parse("2026-03-24T12:00:06Z"));
+      expectRecordFields(run?.outcome, { status: "ok" }, "transient abort corrected outcome");
+    });
+  });
+
+  it("keeps hard timeout lifecycle ends authoritative over later lifecycle errors", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-then-late-error",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout then late error task",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-timeout-then-late-error",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: 10,
+        endedAt: 20,
+        aborted: true,
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+    lifecycleHandler?.({
+      runId: "run-timeout-then-late-error",
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        startedAt: 10,
+        endedAt: 30,
+        error: "agent run aborted",
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    });
+    const announceParams = expectRecordFields(
+      getMockCallArg(mocks.runSubagentAnnounceFlow, 0, 0, "late error timeout announce"),
+      { childRunId: "run-timeout-then-late-error" },
+      "late error timeout announce params",
+    );
+    expectRecordFields(
+      announceParams.outcome,
+      {
+        status: "timeout",
+        endedAt: 20,
+      },
+      "late error timeout announce outcome",
+    );
+
+    const run = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-timeout-then-late-error");
+    expect(run?.outcome?.status).toBe("timeout");
   });
 
   it("announces aborted lifecycle end events as killed subagent failures", async () => {
@@ -3060,6 +4766,61 @@ describe("subagent registry seam flow", () => {
     );
   });
 
+  it("does not let pending timeout grace overwrite a killed subagent", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-timeout-then-killed",
+      childSessionKey: "agent:main:subagent:timeout-then-killed",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "timeout then killed",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+    });
+
+    const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
+      mocks.onAgentEvent.mock.calls.length - 1
+    ] as unknown as
+      | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
+      | undefined;
+    const lifecycleHandler = lastOnAgentEventCall?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-timeout-then-killed",
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        endedAt: Date.parse("2026-03-24T12:00:01Z"),
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+
+    expect(
+      mod.markSubagentRunTerminated({
+        runId: "run-timeout-then-killed",
+        reason: "manual kill",
+      }),
+    ).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    const killedRun = mod
+      .listSubagentRunsForRequester("agent:main:main")
+      .find((entry) => entry.runId === "run-timeout-then-killed");
+    expect(killedRun?.outcome?.status).toBe("error");
+    expect(killedRun?.outcome?.error).toBe("manual kill");
+    expect(killedRun?.endedReason).toBe("subagent-killed");
+  });
+
   it("deletes killed delete-mode runs and notifies deleted cleanup", async () => {
     mod.registerSubagentRun({
       runId: "run-killed-delete",
@@ -3277,6 +5038,69 @@ describe("subagent registry seam flow", () => {
         workspaceDir: "/tmp/workspace",
       },
     );
+  });
+
+  it("finalizes the detached task when an active subagent run is released", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-release-task",
+      childSessionKey: "agent:main:subagent:release-task",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "registered task",
+      cleanup: "keep",
+      runTimeoutSeconds: 60,
+    });
+
+    expect(listTaskRecords().find((task) => task.runId === "run-release-task")?.status).toBe(
+      "running",
+    );
+
+    mod.releaseSubagentRun("run-release-task");
+
+    const task = listTaskRecords().find((entry) => entry.runId === "run-release-task");
+    expect(task?.status).toBe("cancelled");
+    expect(task?.terminalSummary).toBe("released");
+  });
+
+  it("finalizes the detached task as failed when a pre-acceptance spawn run is discarded", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+
+    mod.registerSubagentRun({
+      runId: "run-discard-spawn-failed-task",
+      childSessionKey: "agent:main:subagent:discard-spawn-failed-task",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "pre-acceptance spawn failed",
+      cleanup: "keep",
+      runTimeoutSeconds: 60,
+    });
+
+    expect(
+      listTaskRecords().find((task) => task.runId === "run-discard-spawn-failed-task")?.status,
+    ).toBe("running");
+
+    expect(mod.discardFailedSubagentSpawnRun("run-discard-spawn-failed-task")).toBe(true);
+
+    const task = listTaskRecords().find((entry) => entry.runId === "run-discard-spawn-failed-task");
+    expect(task?.status).toBe("failed");
+    expect(task?.terminalSummary).toBe("spawn failed");
+    expect(
+      mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .some((entry) => entry.runId === "run-discard-spawn-failed-task"),
+    ).toBe(false);
   });
 
   it("passes stored agentDir through swept context-engine cleanup paths", async () => {

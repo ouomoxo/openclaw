@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { isClientToolNameConflictError } from "../agents/agent-tool-definition-adapter.js";
 import type { ImageContent } from "../agents/command/types.js";
 import type { ClientToolDefinition } from "../agents/embedded-agent-runner/run/params.js";
+import { hasHardAgentRunTimeoutAttribution } from "../agents/run-timeout-attribution.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import type { CliDeps } from "../cli/deps.types.js";
 import { agentCommandFromIngress } from "../commands/agent.js";
@@ -705,6 +706,9 @@ export async function handleOpenResponsesHttpRequest(
       const usage = extractUsageFromResult(result);
       const meta = (result as { meta?: unknown } | null)?.meta;
       const { stopReason, pendingToolCalls } = resolveStopReasonAndPendingToolCalls(meta);
+      const metaRecord =
+        meta && typeof meta === "object" ? (meta as { timeoutPhase?: unknown }) : null;
+      const failedRun = hasHardAgentRunTimeoutAttribution(metaRecord);
 
       // If the agent invoked client tools, return one `function_call`
       // output item per call (in arrival order) plus any assistant text the
@@ -765,12 +769,12 @@ export async function handleOpenResponsesHttpRequest(
       const response = createResponseResource({
         id: responseId,
         model,
-        status: "completed",
+        status: failedRun ? "failed" : "completed",
         output: [
           createAssistantOutputItem({
             id: outputItemId,
             text: content,
-            phase: "final_answer",
+            phase: failedRun ? "commentary" : "final_answer",
             status: "completed",
           }),
         ],
@@ -894,7 +898,10 @@ export async function handleOpenResponsesHttpRequest(
     });
 
     rememberResponseSession();
-    writeSseEvent(res, { type: "response.completed", response: finalResponse });
+    writeSseEvent(res, {
+      type: finalResponse.status === "failed" ? "response.failed" : "response.completed",
+      response: finalResponse,
+    });
     writeDone(res);
     res.end();
   };
@@ -975,8 +982,18 @@ export async function handleOpenResponsesHttpRequest(
     if (evt.stream === "lifecycle") {
       const phase = evt.data?.phase;
       if (phase === "end" || phase === "error") {
-        const finalText = accumulatedText || "No response from OpenClaw.";
-        const finalStatus = phase === "error" ? "failed" : "completed";
+        const errorText = typeof evt.data?.error === "string" ? evt.data.error : undefined;
+        const hardTimeout = hasHardAgentRunTimeoutAttribution(evt.data);
+        const finalText =
+          accumulatedText ||
+          errorText ||
+          (hardTimeout
+            ? "Request timed out before a response was generated."
+            : "No response from OpenClaw.");
+        const finalStatus = phase === "error" || hardTimeout ? "failed" : "completed";
+        if (hardTimeout) {
+          finalUsage = finalUsage ?? createEmptyUsage();
+        }
         requestFinalize(finalStatus, finalText);
       }
     }

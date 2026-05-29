@@ -952,6 +952,188 @@ describe("OpenResponses HTTP API (e2e)", () => {
     }
   });
 
+  it("marks non-streaming hard timeout Responses as failed", async () => {
+    const port = enabledPort;
+    agentCommand.mockClear();
+    agentCommand.mockResolvedValueOnce({
+      payloads: [{ text: "Request timed out before a response was generated." }],
+      meta: {
+        aborted: true,
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    } as never);
+
+    const res = await postResponses(port, {
+      stream: false,
+      model: "openclaw",
+      input: "hi",
+    });
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      status?: string;
+      output?: Array<{ phase?: string; content?: Array<{ text?: string }> }>;
+    };
+    expect(json.status).toBe("failed");
+    expect(json.output?.[0]?.phase).toBe("commentary");
+    expect(json.output?.[0]?.content?.[0]?.text).toMatch(/timed out/i);
+  });
+
+  it("does not mark ordinary non-streaming aborted Responses as hard-timeout failures", async () => {
+    const port = enabledPort;
+    agentCommand.mockClear();
+    agentCommand.mockResolvedValueOnce({
+      payloads: [{ text: "Run was cancelled." }],
+      meta: {
+        aborted: true,
+        stopReason: "user",
+      },
+    } as never);
+
+    const res = await postResponses(port, {
+      stream: false,
+      model: "openclaw",
+      input: "hi",
+    });
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      status?: string;
+      output?: Array<{ phase?: string; content?: Array<{ text?: string }> }>;
+    };
+    expect(json.status).toBe("completed");
+    expect(json.output?.[0]?.phase).toBe("final_answer");
+    expect(json.output?.[0]?.content?.[0]?.text).toBe("Run was cancelled.");
+  });
+
+  it("does not mark ordinary streaming aborted Responses as hard-timeout failures", async () => {
+    const port = enabledPort;
+    agentCommand.mockClear();
+    agentCommand.mockImplementationOnce((async (opts: unknown) => {
+      const runId = (opts as { runId?: string }).runId ?? "";
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          aborted: true,
+          stopReason: "user",
+        },
+      });
+      return { payloads: [{ text: "Run was cancelled." }] };
+    }) as never);
+
+    const res = await postResponses(port, {
+      stream: true,
+      model: "openclaw",
+      input: "hi",
+    });
+
+    expect(res.status).toBe(200);
+    const events = parseSseEvents(await res.text());
+    const completed = findSseEvent(events, "response.completed");
+    const response = (
+      parseSseData(completed) as {
+        response?: { status?: string; output?: Array<{ phase?: string }> };
+      }
+    ).response;
+    expect(response?.status).toBe("completed");
+    expect(response?.output?.[0]?.phase).toBe("final_answer");
+  });
+
+  it("uses actionable text for streaming hard timeout Responses without lifecycle errors", async () => {
+    const port = enabledPort;
+    agentCommand.mockClear();
+    agentCommand.mockImplementationOnce((async (opts: unknown) => {
+      const runId = (opts as { runId?: string }).runId ?? "";
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+      return {
+        payloads: [{ text: "Request timed out before a response was generated." }],
+        meta: {
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      };
+    }) as never);
+
+    const res = await postResponses(port, {
+      stream: true,
+      model: "openclaw",
+      input: "hi",
+    });
+
+    expect(res.status).toBe(200);
+    const events = parseSseEvents(await res.text());
+    const completed = findSseEvent(events, "response.failed");
+    const response = (
+      parseSseData(completed) as {
+        response?: {
+          status?: string;
+          output?: Array<{ phase?: string; content?: Array<{ text?: string }> }>;
+        };
+      }
+    ).response;
+    expect(response?.status).toBe("failed");
+    expect(response?.output?.[0]?.phase).toBe("commentary");
+    expect(response?.output?.[0]?.content?.[0]?.text).toMatch(/timed out/i);
+  });
+
+  it("streams terminal hard timeout Responses before the agent command returns", async () => {
+    const port = enabledPort;
+    agentCommand.mockClear();
+    agentCommand.mockImplementationOnce((async (opts: unknown) => {
+      const runId = (opts as { runId?: string }).runId ?? "";
+      setTimeout(() => {
+        emitAgentEvent({
+          runId,
+          stream: "lifecycle",
+          data: {
+            phase: "end",
+            timeoutPhase: "post_turn",
+            providerStarted: true,
+          },
+        });
+      }, 0);
+      return await new Promise(() => {});
+    }) as never);
+
+    const res = await postResponses(port, {
+      stream: true,
+      model: "openclaw",
+      input: "hi",
+    });
+
+    expect(res.status).toBe(200);
+    const text = await Promise.race([
+      res.text(),
+      new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error("stream hard timeout response did not finish")), 1_000),
+      ),
+    ]);
+    const events = parseSseEvents(text);
+    const completed = findSseEvent(events, "response.failed");
+    const response = (
+      parseSseData(completed) as {
+        response?: {
+          status?: string;
+          output?: Array<{ phase?: string; content?: Array<{ text?: string }> }>;
+        };
+      }
+    ).response;
+    expect(response?.status).toBe("failed");
+    expect(response?.output?.[0]?.phase).toBe("commentary");
+    expect(response?.output?.[0]?.content?.[0]?.text).toMatch(/timed out/i);
+  });
+
   it("preserves assistant text alongside non-stream function_call output", async () => {
     const port = enabledPort;
     agentCommand.mockClear();

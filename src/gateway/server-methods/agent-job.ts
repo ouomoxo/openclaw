@@ -1,5 +1,6 @@
 import { AGENT_RUN_ABORTED_ERROR, isAbortedAgentStopReason } from "../../agents/run-termination.js";
 import {
+  isHardAgentRunTimeoutPhase,
   normalizeAgentRunTimeoutPhase,
   normalizeProviderStarted,
   type AgentRunTimeoutPhase,
@@ -22,6 +23,7 @@ const AGENT_RUN_ERROR_RETRY_GRACE_MS = 15_000;
  * final success is about to arrive.
  */
 const AGENT_RUN_TIMEOUT_RETRY_GRACE_MS = 15_000;
+const MIN_COMPARABLE_EPOCH_MS = Date.parse("2000-01-01T00:00:00Z");
 
 const agentRunCache = new Map<string, AgentRunSnapshot>();
 const agentRunStarts = new Map<string, number>();
@@ -40,6 +42,8 @@ type AgentRunSnapshot = {
   livenessState?: string;
   yielded?: boolean;
   pendingError?: boolean;
+  hardTimeout?: boolean;
+  deferTimeoutSurface?: boolean;
   timeoutPhase?: AgentRunTimeoutPhase;
   providerStarted?: boolean;
   ts: number;
@@ -61,9 +65,30 @@ function pruneAgentRunCache(now = Date.now()) {
   }
 }
 
+function stripPendingOnlySnapshotFields(entry: AgentRunSnapshot): AgentRunSnapshot {
+  if (entry.deferTimeoutSurface !== true) {
+    return entry;
+  }
+  const { deferTimeoutSurface: _deferTimeoutSurface, ...publicEntry } = entry;
+  return publicEntry;
+}
+
 function recordAgentRunSnapshot(entry: AgentRunSnapshot) {
   pruneAgentRunCache(entry.ts);
-  agentRunCache.set(entry.runId, entry);
+  const existing = agentRunCache.get(entry.runId);
+  if (existing?.hardTimeout === true) {
+    if (entry.status === "timeout") {
+      agentRunCache.set(
+        entry.runId,
+        stripPendingOnlySnapshotFields(mergeHardTimeoutSnapshot(existing, entry)),
+      );
+      return;
+    }
+    if (shouldKeepHardTimeoutOverSnapshot(existing, entry)) {
+      return;
+    }
+  }
+  agentRunCache.set(entry.runId, stripPendingOnlySnapshotFields(entry));
 }
 
 function clearPendingAgentRunError(runId: string) {
@@ -100,8 +125,31 @@ function schedulePendingAgentRunError(snapshot: AgentRunSnapshot) {
   pendingAgentRunErrors.set(snapshot.runId, { snapshot, dueAt, timer });
 }
 
+function mergeHardTimeoutSnapshot(
+  existing: AgentRunSnapshot,
+  snapshot: AgentRunSnapshot,
+): AgentRunSnapshot {
+  return {
+    ...existing,
+    error: existing.error ?? snapshot.error,
+    stopReason: existing.stopReason ?? snapshot.stopReason,
+    livenessState: existing.livenessState ?? snapshot.livenessState,
+    yielded: existing.yielded ?? snapshot.yielded,
+    pendingError: existing.pendingError ?? snapshot.pendingError,
+    timeoutPhase: existing.timeoutPhase ?? snapshot.timeoutPhase,
+    providerStarted: existing.providerStarted ?? snapshot.providerStarted,
+    hardTimeout: true,
+    deferTimeoutSurface: existing.deferTimeoutSurface === true,
+  };
+}
+
 function schedulePendingAgentRunTimeout(snapshot: AgentRunSnapshot) {
   clearPendingAgentRunError(snapshot.runId);
+  const existing = pendingAgentRunTimeouts.get(snapshot.runId);
+  if (existing?.snapshot.hardTimeout === true) {
+    existing.snapshot = mergeHardTimeoutSnapshot(existing.snapshot, snapshot);
+    return;
+  }
   clearPendingAgentRunTimeout(snapshot.runId);
   const dueAt = Date.now() + AGENT_RUN_TIMEOUT_RETRY_GRACE_MS;
   const timer = setTimeout(() => {
@@ -154,6 +202,51 @@ function createPendingErrorTimeoutSnapshot(snapshot: AgentRunSnapshot): AgentRun
   };
 }
 
+function shouldSurfacePendingTimeoutSnapshot(
+  snapshot: AgentRunSnapshot,
+  opts?: { dueAt?: number; now?: number },
+): boolean {
+  const now = opts?.now ?? Date.now();
+  return (
+    snapshot.status === "timeout" &&
+    snapshot.hardTimeout === true &&
+    (snapshot.deferTimeoutSurface !== true ||
+      (typeof opts?.dueAt === "number" && opts.dueAt <= now))
+  );
+}
+
+function shouldKeepHardTimeoutOverSnapshot(
+  hardTimeoutSnapshot: AgentRunSnapshot | undefined,
+  snapshot: AgentRunSnapshot,
+): boolean {
+  if (hardTimeoutSnapshot?.hardTimeout !== true || snapshot.status === "timeout") {
+    return false;
+  }
+  if (typeof hardTimeoutSnapshot.endedAt !== "number") {
+    return true;
+  }
+  return typeof snapshot.endedAt !== "number" || snapshot.endedAt > hardTimeoutSnapshot.endedAt;
+}
+
+function isBeforeFreshLifecycleWindow(params: {
+  snapshot: AgentRunSnapshot;
+  ignoreLifecycleEventsBeforeMs?: number;
+}) {
+  const { ignoreLifecycleEventsBeforeMs, snapshot } = params;
+  if (
+    typeof ignoreLifecycleEventsBeforeMs !== "number" ||
+    ignoreLifecycleEventsBeforeMs < MIN_COMPARABLE_EPOCH_MS
+  ) {
+    return false;
+  }
+  const terminalAt = snapshot.endedAt ?? snapshot.startedAt;
+  return (
+    typeof terminalAt === "number" &&
+    terminalAt >= MIN_COMPARABLE_EPOCH_MS &&
+    terminalAt < ignoreLifecycleEventsBeforeMs
+  );
+}
+
 function createSnapshotFromLifecycleEvent(params: {
   runId: string;
   phase: "end" | "error";
@@ -168,11 +261,18 @@ function createSnapshotFromLifecycleEvent(params: {
   const livenessState = typeof data?.livenessState === "string" ? data.livenessState : undefined;
   const blocked = isBlockedLivenessState(livenessState);
   const abortedStopReason = isAbortedAgentStopReason(stopReason);
-  const status =
-    phase === "error" || blocked || abortedStopReason ? "error" : data?.aborted ? "timeout" : "ok";
-  const resolvedError = abortedStopReason && !error ? AGENT_RUN_ABORTED_ERROR : error;
-  const timeoutPhase =
-    status === "timeout" ? normalizeAgentRunTimeoutPhase(data?.timeoutPhase) : undefined;
+  const timeoutPhase = normalizeAgentRunTimeoutPhase(data?.timeoutPhase);
+  const hardTimeoutPhase = isHardAgentRunTimeoutPhase(timeoutPhase);
+  const abortedEnd = phase === "end" && data?.aborted === true;
+  const status = hardTimeoutPhase
+    ? "timeout"
+    : phase === "error" || blocked || abortedStopReason
+      ? "error"
+      : data?.aborted
+        ? "timeout"
+        : "ok";
+  const resolvedError =
+    abortedStopReason && !hardTimeoutPhase && !error ? AGENT_RUN_ABORTED_ERROR : error;
   const providerStarted = normalizeProviderStarted(data?.providerStarted);
   return {
     runId,
@@ -183,6 +283,8 @@ function createSnapshotFromLifecycleEvent(params: {
     stopReason,
     livenessState,
     ...(data?.yielded === true ? { yielded: true } : {}),
+    ...(hardTimeoutPhase ? { hardTimeout: true } : {}),
+    ...(abortedEnd && timeoutPhase !== "post_turn" ? { deferTimeoutSurface: true } : {}),
     ...(timeoutPhase ? { timeoutPhase } : {}),
     ...(providerStarted !== undefined ? { providerStarted } : {}),
     ts: Date.now(),
@@ -221,12 +323,16 @@ function ensureAgentRunListener() {
       data: evt.data,
     });
     agentRunStarts.delete(evt.runId);
-    if (phase === "error") {
-      schedulePendingAgentRunError(snapshot);
-      return;
-    }
     if (snapshot.status === "timeout") {
       schedulePendingAgentRunTimeout(snapshot);
+      return;
+    }
+    const pendingTimeout = pendingAgentRunTimeouts.get(evt.runId);
+    if (shouldKeepHardTimeoutOverSnapshot(pendingTimeout?.snapshot, snapshot)) {
+      return;
+    }
+    if (phase === "error") {
+      schedulePendingAgentRunError(snapshot);
       return;
     }
     clearPendingAgentRunError(evt.runId);
@@ -262,12 +368,38 @@ export async function waitForAgentJob(params: {
   timeoutMs: number;
   signal?: AbortSignal;
   ignoreCachedSnapshot?: boolean;
+  ignoreLifecycleEventsBeforeMs?: number;
 }): Promise<AgentRunSnapshot | null> {
-  const { runId, timeoutMs, signal, ignoreCachedSnapshot = false } = params;
+  const {
+    runId,
+    timeoutMs,
+    signal,
+    ignoreCachedSnapshot = false,
+    ignoreLifecycleEventsBeforeMs,
+  } = params;
   ensureAgentRunListener();
   const cached = ignoreCachedSnapshot ? undefined : getCachedAgentRun(runId);
   if (cached) {
     return cached;
+  }
+  const pendingTimeout = getPendingAgentRunTimeout(runId);
+  if (
+    pendingTimeout &&
+    !isBeforeFreshLifecycleWindow({
+      snapshot: pendingTimeout.snapshot,
+      ignoreLifecycleEventsBeforeMs,
+    }) &&
+    (!ignoreCachedSnapshot ||
+      pendingTimeout.snapshot.hardTimeout === true ||
+      pendingTimeout.snapshot.timeoutPhase) &&
+    shouldSurfacePendingTimeoutSnapshot(pendingTimeout.snapshot, {
+      dueAt: pendingTimeout.dueAt,
+    })
+  ) {
+    const snapshot = pendingTimeout.snapshot;
+    clearPendingAgentRunTimeout(runId);
+    recordAgentRunSnapshot(snapshot);
+    return stripPendingOnlySnapshotFields(snapshot);
   }
   if (timeoutMs <= 0 || signal?.aborted) {
     return null;
@@ -277,6 +409,7 @@ export async function waitForAgentJob(params: {
     let settled = false;
     let pendingErrorTimer: NodeJS.Timeout | undefined;
     let pendingTimeoutTimer: NodeJS.Timeout | undefined;
+    let pendingTimeoutSnapshot: AgentRunSnapshot | undefined;
     let onAbort: (() => void) | undefined;
     let removeWaiter = () => {};
 
@@ -294,6 +427,7 @@ export async function waitForAgentJob(params: {
       }
       clearTimeout(pendingTimeoutTimer);
       pendingTimeoutTimer = undefined;
+      pendingTimeoutSnapshot = undefined;
     };
 
     const finish = (entry: AgentRunSnapshot | null) => {
@@ -309,7 +443,7 @@ export async function waitForAgentJob(params: {
       if (onAbort) {
         signal?.removeEventListener("abort", onAbort);
       }
-      resolve(entry);
+      resolve(entry ? stripPendingOnlySnapshotFields(entry) : null);
     };
 
     const scheduleTerminalFinish = (
@@ -317,16 +451,25 @@ export async function waitForAgentJob(params: {
       snapshot: AgentRunSnapshot,
       delayMs: number,
     ) => {
+      if (kind === "timeout" && pendingTimeoutSnapshot?.hardTimeout === true) {
+        pendingTimeoutSnapshot = mergeHardTimeoutSnapshot(pendingTimeoutSnapshot, snapshot);
+        return;
+      }
       clearPendingErrorTimer();
       clearPendingTimeoutTimer();
+      if (kind === "timeout") {
+        pendingTimeoutSnapshot = snapshot;
+      }
       const timerRef = setSafeTimeout(() => {
         const latest = ignoreCachedSnapshot ? undefined : getCachedAgentRun(runId);
         if (latest) {
           finish(latest);
           return;
         }
-        recordAgentRunSnapshot(snapshot);
-        finish(snapshot);
+        const terminalSnapshot =
+          kind === "timeout" ? (pendingTimeoutSnapshot ?? snapshot) : snapshot;
+        recordAgentRunSnapshot(terminalSnapshot);
+        finish(terminalSnapshot);
       }, delayMs);
       timerRef.unref?.();
       if (kind === "error") {
@@ -345,7 +488,10 @@ export async function waitForAgentJob(params: {
 
     const scheduleTimeoutFinish = (
       snapshot: AgentRunSnapshot,
-      delayMs = AGENT_RUN_TIMEOUT_RETRY_GRACE_MS,
+      delayMs = snapshot.deferTimeoutSurface === true ||
+      (snapshot.hardTimeout === true && snapshot.timeoutPhase !== "post_turn")
+        ? AGENT_RUN_TIMEOUT_RETRY_GRACE_MS
+        : 0,
     ) => {
       scheduleTerminalFinish("timeout", snapshot, delayMs);
     };
@@ -387,12 +533,23 @@ export async function waitForAgentJob(params: {
         phase,
         data: evt.data,
       });
-      if (phase === "error") {
-        scheduleErrorFinish(snapshot);
+      if (
+        isBeforeFreshLifecycleWindow({
+          snapshot,
+          ignoreLifecycleEventsBeforeMs,
+        })
+      ) {
         return;
       }
       if (snapshot.status === "timeout") {
         scheduleTimeoutFinish(snapshot);
+        return;
+      }
+      if (shouldKeepHardTimeoutOverSnapshot(pendingTimeoutSnapshot, snapshot)) {
+        return;
+      }
+      if (phase === "error") {
+        scheduleErrorFinish(snapshot);
         return;
       }
       recordAgentRunSnapshot(snapshot);
@@ -401,7 +558,32 @@ export async function waitForAgentJob(params: {
     removeWaiter = addAgentRunWaiter(runId);
 
     const timer = setSafeTimeout(() => {
+      const pendingTimeout = getPendingAgentRunTimeout(runId);
+      if (
+        pendingTimeout &&
+        !isBeforeFreshLifecycleWindow({
+          snapshot: pendingTimeout.snapshot,
+          ignoreLifecycleEventsBeforeMs,
+        }) &&
+        shouldSurfacePendingTimeoutSnapshot(pendingTimeout.snapshot, {
+          dueAt: pendingTimeout.dueAt,
+        })
+      ) {
+        recordAgentRunSnapshot(pendingTimeout.snapshot);
+        finish(pendingTimeout.snapshot);
+        return;
+      }
       const pendingError = getPendingAgentRunError(runId);
+      if (
+        pendingError &&
+        isBeforeFreshLifecycleWindow({
+          snapshot: pendingError.snapshot,
+          ignoreLifecycleEventsBeforeMs,
+        })
+      ) {
+        finish(null);
+        return;
+      }
       finish(pendingError ? createPendingErrorTimeoutSnapshot(pendingError.snapshot) : null);
     }, timeoutMs);
     onAbort = () => finish(null);

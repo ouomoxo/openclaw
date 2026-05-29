@@ -1,4 +1,5 @@
 import { classifyFailoverReason, isAuthErrorMessage } from "../agents/embedded-agent-helpers.js";
+import { hasHardAgentRunTimeoutAttribution } from "../agents/run-timeout-attribution.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
 import { formatRawAssistantErrorForUi } from "../shared/assistant-error-format.js";
 import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
@@ -661,7 +662,7 @@ export function createEventHandlers(context: EventHandlerContext) {
         if (!canUpdateActivityStatus) {
           return;
         }
-        setActivityStatus("idle");
+        setActivityStatus(hasHardAgentRunTimeoutAttribution(evt.data) ? "error" : "idle");
       }
       if (phase === "error") {
         postFinalizingRuns.delete(evt.runId);

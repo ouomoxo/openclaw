@@ -644,7 +644,8 @@ vi.mock("./spawned-context.js", () => ({
   normalizeSpawnedRunMetadata: (meta: unknown) => meta ?? {},
 }));
 
-vi.mock("./timeout.js", () => ({
+vi.mock("./timeout.js", async () => ({
+  ...(await vi.importActual<typeof import("./timeout.js")>("./timeout.js")),
   resolveAgentTimeoutMs: () => 30_000,
 }));
 
@@ -1083,6 +1084,49 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
       },
     );
     expect(lifecycleFinishingCalls).toHaveLength(1);
+  });
+
+  it("propagates timeout attribution to deferred terminal lifecycle events", async () => {
+    setupSingleAttemptFallback();
+    const hardTimeoutResult = makeSuccessResult("openai", "gpt-5.4");
+    hardTimeoutResult.meta = {
+      ...hardTimeoutResult.meta,
+      aborted: true,
+      stopReason: "rpc",
+      livenessState: "blocked",
+      timeoutPhase: "provider",
+      providerStarted: true,
+    };
+    state.runAgentAttemptMock.mockResolvedValue(hardTimeoutResult);
+
+    await runBasicAgentCommand();
+
+    const terminalLifecycleData = state.emitAgentEventMock.mock.calls
+      .map((call: unknown[]) => call[0] as { stream?: string; data?: Record<string, unknown> })
+      .filter((event) => event.stream === "lifecycle")
+      .map((event) => event.data)
+      .filter((data) => data?.phase === "finishing" || data?.phase === "end");
+
+    expect(terminalLifecycleData).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "finishing",
+          aborted: true,
+          stopReason: "rpc",
+          livenessState: "blocked",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        }),
+        expect.objectContaining({
+          phase: "end",
+          aborted: true,
+          stopReason: "rpc",
+          livenessState: "blocked",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        }),
+      ]),
+    );
   });
 
   it("validates explicit thinking against configured model compat without an allowlist", async () => {

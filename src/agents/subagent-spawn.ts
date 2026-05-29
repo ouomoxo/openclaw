@@ -34,11 +34,19 @@ import {
 import { resolveSubagentCapabilities } from "./subagent-capabilities.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { buildSubagentInitialUserMessage } from "./subagent-initial-user-message.js";
-import { countActiveRunsForSession, registerSubagentRun } from "./subagent-registry.js";
+import {
+  SUBAGENT_RUN_TIMEOUT_RECONCILIATION_GRACE_MS,
+  armSubagentRunTimeout,
+  countActiveRunsForSession,
+  discardFailedSubagentSpawnRun,
+  listSubagentRunsForRequester,
+  registerSubagentRun,
+} from "./subagent-registry.js";
 import { resolveSubagentSpawnAcceptedNote } from "./subagent-spawn-accepted-note.js";
 import { resolveSubagentSpawnOwnership } from "./subagent-spawn-ownership.js";
 import { resolveSubagentTargetPolicy } from "./subagent-target-policy.js";
 import { normalizeSubagentTaskName } from "./subagent-task-name.js";
+import { MAX_AGENT_TIMEOUT_MS } from "./timeout.js";
 export {
   SUBAGENT_SPAWN_ACCEPTED_NOTE,
   SUBAGENT_SPAWN_SESSION_ACCEPTED_NOTE,
@@ -123,7 +131,7 @@ const defaultSubagentSpawnDeps: SubagentSpawnDeps = {
 let subagentSpawnDeps: SubagentSpawnDeps = defaultSubagentSpawnDeps;
 const SUBAGENT_CONTROL_GATEWAY_TIMEOUT_MS = 60_000;
 const DEFAULT_SUBAGENT_AGENT_GATEWAY_TIMEOUT_MS = 60_000;
-const MAX_SUBAGENT_AGENT_GATEWAY_TIMEOUT_MS = 300_000;
+const SUBAGENT_AGENT_RPC_SETTLE_AFTER_TIMEOUT_MS = 5_000;
 
 export type SpawnSubagentParams = {
   task: string;
@@ -214,14 +222,6 @@ async function callSubagentGateway(
   });
 }
 
-function readGatewayRunId(response: Awaited<ReturnType<typeof callGateway>>): string | undefined {
-  if (!response || typeof response !== "object") {
-    return undefined;
-  }
-  const { runId } = response as { runId?: unknown };
-  return typeof runId === "string" && runId ? runId : undefined;
-}
-
 function resolveSubagentAgentGatewayTimeoutMs(runTimeoutSeconds: number): number {
   const runTimeoutMs =
     Number.isFinite(runTimeoutSeconds) && runTimeoutSeconds > 0
@@ -230,10 +230,27 @@ function resolveSubagentAgentGatewayTimeoutMs(runTimeoutSeconds: number): number
   if (runTimeoutMs <= 0) {
     return DEFAULT_SUBAGENT_AGENT_GATEWAY_TIMEOUT_MS;
   }
+  const gatewayTimeoutMs =
+    runTimeoutMs +
+    SUBAGENT_RUN_TIMEOUT_RECONCILIATION_GRACE_MS +
+    SUBAGENT_AGENT_RPC_SETTLE_AFTER_TIMEOUT_MS;
+  // The child RPC must outlive the registry's explicit run-timeout fallback;
+  // otherwise a hung first turn can be released as a spawn failure before its
+  // authoritative timeout settles.
   return Math.min(
-    MAX_SUBAGENT_AGENT_GATEWAY_TIMEOUT_MS,
-    Math.max(DEFAULT_SUBAGENT_AGENT_GATEWAY_TIMEOUT_MS, runTimeoutMs + 5_000),
+    MAX_AGENT_TIMEOUT_MS,
+    Math.max(DEFAULT_SUBAGENT_AGENT_GATEWAY_TIMEOUT_MS, gatewayTimeoutMs),
   );
+}
+
+function readGatewayAcceptedAt(
+  response: Awaited<ReturnType<typeof callGateway>>,
+): number | undefined {
+  if (!response || typeof response !== "object") {
+    return undefined;
+  }
+  const { acceptedAt } = response as { acceptedAt?: unknown };
+  return typeof acceptedAt === "number" && Number.isFinite(acceptedAt) ? acceptedAt : undefined;
 }
 
 function buildDirectChildSessionPatch(patch: Record<string, unknown>): Partial<SessionEntry> {
@@ -1155,6 +1172,8 @@ export async function spawnSubagentDirect(
   }
   const contextEnginePreparation = contextEnginePrepareResult.preparation;
 
+  // Gateway agent runs use the idempotency key as runId. Register before the
+  // child RPC so first-turn hangs are covered by the registry timeout deadline.
   const childIdem = crypto.randomUUID();
   let childRunId: string = childIdem;
   const deliverInitialChildRunDirectly =
@@ -1162,109 +1181,6 @@ export async function spawnSubagentDirect(
   const shouldAnnounceCompletion = deliverInitialChildRunDirectly
     ? false
     : expectsCompletionMessage;
-  try {
-    const {
-      spawnedBy: _spawnedBy,
-      workspaceDir: _workspaceDir,
-      ...publicSpawnedMetadata
-    } = spawnedMetadata;
-    const response = await callSubagentGateway({
-      method: "agent",
-      params: {
-        message: childTaskMessage,
-        sessionKey: childSessionKey,
-        channel: childSessionOrigin?.channel,
-        to: childSessionOrigin?.to ?? undefined,
-        accountId: childSessionOrigin?.accountId ?? undefined,
-        threadId:
-          childSessionOrigin?.threadId != null
-            ? stringifyRouteThreadId(childSessionOrigin.threadId)
-            : undefined,
-        idempotencyKey: childIdem,
-        deliver: deliverInitialChildRunDirectly,
-        lane: AGENT_LANE_SUBAGENT,
-        disableMessageTool: true,
-        cleanupBundleMcpOnRunEnd: spawnMode !== "session",
-        extraSystemPrompt: childSystemPrompt,
-        thinking: thinkingOverride,
-        timeout: runTimeoutSeconds,
-        label: label || undefined,
-        ...(bootstrapContextMode
-          ? {
-              bootstrapContextMode,
-              bootstrapContextRunKind: "default" as const,
-            }
-          : {}),
-        ...publicSpawnedMetadata,
-      },
-      timeoutMs: resolveSubagentAgentGatewayTimeoutMs(runTimeoutSeconds),
-    });
-    const runId = readGatewayRunId(response);
-    if (runId) {
-      childRunId = runId;
-    }
-  } catch (err) {
-    await rollbackPreparedContextEngine(contextEnginePreparation);
-    if (attachmentAbsDir) {
-      try {
-        await fs.rm(attachmentAbsDir, { recursive: true, force: true });
-      } catch {
-        // Best-effort cleanup only.
-      }
-    }
-    let emitLifecycleHooks = false;
-    if (threadBindingReady) {
-      const hasEndedHook = hookRunner?.hasHooks("subagent_ended") === true;
-      let endedHookEmitted = false;
-      if (hasEndedHook) {
-        try {
-          await hookRunner?.runSubagentEnded(
-            {
-              targetSessionKey: childSessionKey,
-              targetKind: "subagent",
-              reason: "spawn-failed",
-              sendFarewell: true,
-              accountId: childSessionOrigin?.accountId,
-              runId: childRunId,
-              outcome: "error",
-              error: "Session failed to start",
-            },
-            {
-              runId: childRunId,
-              childSessionKey,
-              requesterSessionKey: requesterInternalKey,
-            },
-          );
-          endedHookEmitted = true;
-        } catch {
-          // Spawn should still return an actionable error even if cleanup hooks fail.
-        }
-      }
-      emitLifecycleHooks = !endedHookEmitted;
-    }
-    // Always delete the provisional child session after a failed spawn attempt.
-    // If we already emitted subagent_ended above, suppress a duplicate lifecycle hook.
-    try {
-      await callSubagentGateway({
-        method: "sessions.delete",
-        params: {
-          key: childSessionKey,
-          deleteTranscript: true,
-          emitLifecycleHooks,
-        },
-        timeoutMs: SUBAGENT_CONTROL_GATEWAY_TIMEOUT_MS,
-      });
-    } catch {
-      // Best-effort only.
-    }
-    const messageText = summarizeError(err);
-    return {
-      status: "error",
-      error: messageText,
-      childSessionKey,
-      runId: childRunId,
-    };
-  }
 
   try {
     registerSubagentRun({
@@ -1316,6 +1232,129 @@ export async function spawnSubagentDirect(
       childSessionKey,
       runId: childRunId,
     };
+  }
+
+  try {
+    const {
+      spawnedBy: _spawnedBy,
+      workspaceDir: _workspaceDir,
+      ...publicSpawnedMetadata
+    } = spawnedMetadata;
+    const response = await callSubagentGateway({
+      method: "agent",
+      params: {
+        message: childTaskMessage,
+        sessionKey: childSessionKey,
+        channel: childSessionOrigin?.channel,
+        to: childSessionOrigin?.to ?? undefined,
+        accountId: childSessionOrigin?.accountId ?? undefined,
+        threadId:
+          childSessionOrigin?.threadId != null
+            ? stringifyRouteThreadId(childSessionOrigin.threadId)
+            : undefined,
+        idempotencyKey: childIdem,
+        deliver: deliverInitialChildRunDirectly,
+        lane: AGENT_LANE_SUBAGENT,
+        disableMessageTool: true,
+        cleanupBundleMcpOnRunEnd: spawnMode !== "session",
+        extraSystemPrompt: childSystemPrompt,
+        thinking: thinkingOverride,
+        timeout: runTimeoutSeconds,
+        label: label || undefined,
+        ...(bootstrapContextMode
+          ? {
+              bootstrapContextMode,
+              bootstrapContextRunKind: "default" as const,
+            }
+          : {}),
+        ...publicSpawnedMetadata,
+      },
+      timeoutMs: resolveSubagentAgentGatewayTimeoutMs(runTimeoutSeconds),
+    });
+    const registeredRun = listSubagentRunsForRequester(
+      ownership.completionRequesterSessionKey,
+    ).find((entry) => entry.runId === childRunId);
+    const runAlreadyTerminal =
+      typeof registeredRun?.endedAt === "number" || registeredRun?.outcome != null;
+    if (!runAlreadyTerminal && runTimeoutSeconds > 0) {
+      armSubagentRunTimeout({
+        runId: childRunId,
+        runTimeoutSeconds,
+        startedAt: readGatewayAcceptedAt(response),
+      });
+    }
+  } catch (err) {
+    const registeredRun = listSubagentRunsForRequester(
+      ownership.completionRequesterSessionKey,
+    ).find((entry) => entry.runId === childRunId);
+    const runAlreadyTerminal =
+      typeof registeredRun?.endedAt === "number" || registeredRun?.outcome != null;
+    if (runAlreadyTerminal) {
+      // The registry timeout won while the child RPC was still unwinding.
+      // Preserve that terminal result instead of turning it into a late spawn failure.
+    } else {
+      discardFailedSubagentSpawnRun(childRunId);
+      await rollbackPreparedContextEngine(contextEnginePreparation);
+      if (attachmentAbsDir) {
+        try {
+          await fs.rm(attachmentAbsDir, { recursive: true, force: true });
+        } catch {
+          // Best-effort cleanup only.
+        }
+      }
+      let emitLifecycleHooks = false;
+      if (threadBindingReady) {
+        const hasEndedHook = hookRunner?.hasHooks("subagent_ended") === true;
+        let endedHookEmitted = false;
+        if (hasEndedHook) {
+          try {
+            await hookRunner?.runSubagentEnded(
+              {
+                targetSessionKey: childSessionKey,
+                targetKind: "subagent",
+                reason: "spawn-failed",
+                sendFarewell: true,
+                accountId: childSessionOrigin?.accountId,
+                runId: childRunId,
+                outcome: "error",
+                error: "Session failed to start",
+              },
+              {
+                runId: childRunId,
+                childSessionKey,
+                requesterSessionKey: requesterInternalKey,
+              },
+            );
+            endedHookEmitted = true;
+          } catch {
+            // Spawn should still return an actionable error even if cleanup hooks fail.
+          }
+        }
+        emitLifecycleHooks = !endedHookEmitted;
+      }
+      // Always delete the provisional child session after a failed spawn attempt.
+      // If we already emitted subagent_ended above, suppress a duplicate lifecycle hook.
+      try {
+        await callSubagentGateway({
+          method: "sessions.delete",
+          params: {
+            key: childSessionKey,
+            deleteTranscript: true,
+            emitLifecycleHooks,
+          },
+          timeoutMs: SUBAGENT_CONTROL_GATEWAY_TIMEOUT_MS,
+        });
+      } catch {
+        // Best-effort only.
+      }
+      const messageText = summarizeError(err);
+      return {
+        status: "error",
+        error: messageText,
+        childSessionKey,
+        runId: childRunId,
+      };
+    }
   }
 
   if (hookRunner?.hasHooks("subagent_spawned")) {

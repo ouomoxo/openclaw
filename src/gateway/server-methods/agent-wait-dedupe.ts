@@ -1,5 +1,6 @@
 import { AGENT_RUN_ABORTED_ERROR, isAbortedAgentStopReason } from "../../agents/run-termination.js";
 import {
+  isHardAgentRunTimeoutPhase,
   normalizeAgentRunTimeoutPhase,
   normalizeProviderStarted,
   type AgentRunTimeoutPhase,
@@ -112,6 +113,7 @@ function readTerminalSnapshotFromDedupeEntry(entry: DedupeEntry): AgentWaitTermi
   const providerStarted =
     normalizeProviderStarted(payload?.providerStarted) ??
     normalizeProviderStarted(resultMeta?.providerStarted);
+  const hardRunTimeout = isHardAgentRunTimeoutPhase(timeoutPhase);
   const errorMessage =
     typeof payload?.error === "string"
       ? payload.error
@@ -119,14 +121,15 @@ function readTerminalSnapshotFromDedupeEntry(entry: DedupeEntry): AgentWaitTermi
         ? payload.summary
         : entry.error?.message;
   const abortedStopReason = isAbortedAgentStopReason(stopReason);
-  const normalizedError =
-    abortedStopReason && !errorMessage ? AGENT_RUN_ABORTED_ERROR : errorMessage;
+  const abortedStatus = abortedStopReason && !(status === "timeout" && hardRunTimeout);
+  const normalizedError = abortedStatus && !errorMessage ? AGENT_RUN_ABORTED_ERROR : errorMessage;
 
   if (status === "ok" || status === "timeout") {
     const normalized = normalizeBlockedLivenessWaitStatus({
-      status: abortedStopReason ? "error" : status,
+      status: abortedStatus ? "error" : status,
       livenessState,
       error: normalizedError,
+      preserveBlockedTimeout: hardRunTimeout,
     });
     return {
       status: normalized.status,
@@ -146,6 +149,19 @@ function readTerminalSnapshotFromDedupeEntry(entry: DedupeEntry): AgentWaitTermi
     };
   }
   if (status === "error" || !entry.ok) {
+    if (hardRunTimeout) {
+      return {
+        status: "timeout",
+        startedAt,
+        endedAt,
+        error: normalizedError,
+        stopReason,
+        livenessState,
+        ...(yielded ? { yielded } : {}),
+        ...(timeoutPhase ? { timeoutPhase } : {}),
+        ...(providerStarted !== undefined ? { providerStarted } : {}),
+      };
+    }
     return {
       status: "error",
       startedAt,

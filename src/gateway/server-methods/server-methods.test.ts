@@ -86,6 +86,8 @@ describe("waitForAgentJob", () => {
     endedAt: number;
     aborted?: boolean;
     stopReason?: string;
+    timeoutPhase?: string;
+    providerStarted?: boolean;
   }) {
     const runId = `${params.runIdPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const waitPromise = waitForAgentJob({ runId, timeoutMs: 1_000 });
@@ -103,6 +105,10 @@ describe("waitForAgentJob", () => {
         endedAt: params.endedAt,
         aborted: params.aborted,
         ...(params.stopReason ? { stopReason: params.stopReason } : {}),
+        ...(params.timeoutPhase ? { timeoutPhase: params.timeoutPhase } : {}),
+        ...(params.providerStarted !== undefined
+          ? { providerStarted: params.providerStarted }
+          : {}),
       },
     });
 
@@ -146,6 +152,738 @@ describe("waitForAgentJob", () => {
     }
   });
 
+  it("maps lifecycle error events with timeout attribution to timeout after the retry grace window", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-error-timeout-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 20_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          startedAt: 150,
+          endedAt: 250,
+          error: "Request timed out before a response was generated.",
+          livenessState: "blocked",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        error: "Request timed out before a response was generated.",
+        livenessState: "blocked",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("maps blocked lifecycle end events with hard timeout attribution to timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-end-timeout-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 20_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 250,
+          error: "Request timed out before a response was generated.",
+          livenessState: "blocked",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        livenessState: "blocked",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces pending timeout-attributed lifecycle errors when the wait deadline wins", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-error-timeout-deadline-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 1_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          startedAt: 150,
+          endedAt: 250,
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces pending hard-timeout attribution to zero-timeout polls", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-error-timeout-zero-poll-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const longWait = waitForAgentJob({ runId, timeoutMs: 20_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          startedAt: 150,
+          endedAt: 250,
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      const snapshot = await waitForAgentJob({ runId, timeoutMs: 0 });
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(longWait).resolves.toMatchObject({
+        status: "timeout",
+        timeoutPhase: "provider",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces pending hard-timeout attribution to fresh zero-timeout polls", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-error-timeout-fresh-zero-poll-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const longWait = waitForAgentJob({ runId, timeoutMs: 20_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: Date.parse("2026-03-24T12:00:00Z") },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          startedAt: Date.parse("2026-03-24T12:00:00Z"),
+          endedAt: Date.parse("2026-03-24T12:00:08Z"),
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      const snapshot = await waitForAgentJob({
+        runId,
+        timeoutMs: 0,
+        ignoreCachedSnapshot: true,
+        ignoreLifecycleEventsBeforeMs: Date.parse("2026-03-24T12:00:01Z"),
+      });
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: Date.parse("2026-03-24T12:00:00Z"),
+        endedAt: Date.parse("2026-03-24T12:00:08Z"),
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(longWait).resolves.toMatchObject({
+        status: "timeout",
+        timeoutPhase: "provider",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the first hard-timeout grace deadline when a later timeout event arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-error-timeout-stable-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      let settled = false;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 30_000 });
+      snapshotPromise.then(() => {
+        settled = true;
+      });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          startedAt: 150,
+          endedAt: 250,
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          endedAt: 350,
+          error: "request timed out",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the first hard-timeout grace deadline after an aborted timeout event", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-aborted-timeout-stable-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      let settled = false;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 30_000 });
+      snapshotPromise.then(() => {
+        settled = true;
+      });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 250,
+          aborted: true,
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          endedAt: 350,
+          error: "request timed out",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        error: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps hard-timeout snapshots authoritative over later success events", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-timeout-late-ok-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 30_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 250,
+          aborted: true,
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 300,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps hard-timeout snapshots without endedAt authoritative over later success events", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-timeout-no-ended-late-ok-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 30_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          aborted: true,
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 300,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+      expect(snapshot?.endedAt).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps cached hard-timeout snapshots authoritative over later success events", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-timeout-cached-late-ok-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 30_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 250,
+          aborted: true,
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(snapshotPromise).resolves.toMatchObject({
+        status: "timeout",
+        endedAt: 250,
+        timeoutPhase: "provider",
+      });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 300,
+        },
+      });
+
+      const cachedSnapshot = await waitForAgentJob({ runId, timeoutMs: 1_000 });
+      expectRecordFields(cachedSnapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not surface attributed aborted end snapshots before timeout retry grace", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-aborted-timeout-deadline-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 1_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 250,
+          aborted: true,
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(snapshotPromise).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps plain aborted end snapshots behind timeout retry grace", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-plain-aborted-timeout-grace-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 1_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 250,
+          aborted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(snapshotPromise).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces post-turn aborted hard timeout snapshots without retry grace", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-post-turn-timeout-immediate-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 1_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 250,
+          aborted: true,
+          timeoutPhase: "post_turn",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        timeoutPhase: "post_turn",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces deferred aborted hard timeout snapshots at the retry grace deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-aborted-timeout-grace-deadline-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({ runId, timeoutMs: 15_000 });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt: 150,
+          endedAt: 250,
+          aborted: true,
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      const snapshot = await snapshotPromise;
+      expectRecordFields(snapshot, {
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores timeout-attributed snapshots before the fresh lifecycle window", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-error-timeout-fresh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({
+        runId,
+        timeoutMs: 1_000,
+        ignoreCachedSnapshot: true,
+        ignoreLifecycleEventsBeforeMs: Date.parse("2026-03-24T12:00:10Z"),
+      });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: Date.parse("2026-03-24T12:00:01Z") },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          startedAt: Date.parse("2026-03-24T12:00:01Z"),
+          endedAt: Date.parse("2026-03-24T12:00:02Z"),
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(snapshotPromise).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps fresh lifecycle events with non-epoch timestamps in fresh-wait mode", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-synthetic-timeout-fresh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({
+        runId,
+        timeoutMs: 20_000,
+        ignoreCachedSnapshot: true,
+        ignoreLifecycleEventsBeforeMs: Date.parse("2026-03-24T12:00:10Z"),
+      });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          startedAt: 150,
+          endedAt: 250,
+          error: "Request timed out before a response was generated.",
+          timeoutPhase: "provider",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(snapshotPromise).resolves.toMatchObject({
+        status: "timeout",
+        startedAt: 150,
+        endedAt: 250,
+        timeoutPhase: "provider",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps current hard-timeout lifecycle events in fresh-wait mode", async () => {
+    vi.useFakeTimers();
+    try {
+      const runId = `run-post-turn-timeout-fresh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshotPromise = waitForAgentJob({
+        runId,
+        timeoutMs: 1_000,
+        ignoreCachedSnapshot: true,
+        ignoreLifecycleEventsBeforeMs: 100,
+      });
+
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 150 },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          endedAt: 250,
+          aborted: true,
+          timeoutPhase: "post_turn",
+          providerStarted: true,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(snapshotPromise).resolves.toMatchObject({
+        status: "timeout",
+        endedAt: 250,
+        timeoutPhase: "post_turn",
+        providerStarted: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps non-aborted lifecycle end events as ok", async () => {
     const snapshot = await runLifecycleScenario({
       runIdPrefix: "run-ok",
@@ -172,6 +910,26 @@ describe("waitForAgentJob", () => {
       endedAt: 420,
       stopReason: "aborted",
       error: "agent run aborted",
+    });
+  });
+
+  it("does not synthesize aborted errors for hard timeout lifecycle snapshots", async () => {
+    const snapshot = await runLifecycleScenario({
+      runIdPrefix: "run-aborted-hard-timeout",
+      startedAt: 430,
+      endedAt: 440,
+      stopReason: "aborted",
+      timeoutPhase: "provider",
+      providerStarted: true,
+    });
+    expectRecordFields(snapshot, {
+      status: "timeout",
+      startedAt: 430,
+      endedAt: 440,
+      stopReason: "aborted",
+      timeoutPhase: "provider",
+      providerStarted: true,
+      error: undefined,
     });
   });
 

@@ -27,6 +27,10 @@ import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../../agents/ag
 import { rewriteTranscriptEntriesInSessionFile } from "../../agents/embedded-agent-runner/transcript-rewrite.js";
 import { runAgentHarnessBeforeMessageWriteHook } from "../../agents/harness/hook-helpers.js";
 import { resolveProviderIdForAuth } from "../../agents/provider-auth-aliases.js";
+import {
+  isHardAgentRunTimeoutPhase,
+  type AgentRunTimeoutPhase,
+} from "../../agents/run-timeout-attribution.js";
 import type { AgentMessage } from "../../agents/runtime/index.js";
 import { ensureSandboxWorkspaceForSession } from "../../agents/sandbox/context.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
@@ -2780,6 +2784,12 @@ export const chatHandlers: GatewayRequestHandlers = {
       const deliveredReplies: Array<{ payload: ReplyPayload; kind: "block" | "final" }> = [];
       let appendedWebchatAgentMedia = false;
       let agentRunStarted = false;
+      let returnedAgentRunTimeoutMeta:
+        | {
+            agentRunTimeoutPhase?: AgentRunTimeoutPhase;
+            agentRunProviderStarted?: boolean;
+          }
+        | undefined;
       const userTurnRecorder: UserTurnTranscriptRecorder = createUserTurnTranscriptRecorder({
         input: baseUserTurnInput,
         resolveInput: () => userTurnInputPromise,
@@ -2977,6 +2987,17 @@ export const chatHandlers: GatewayRequestHandlers = {
                     }
                   }
                 }
+              },
+              onAgentRunTerminalMetadata: (metadata) => {
+                if (!isHardAgentRunTimeoutPhase(metadata.timeoutPhase)) {
+                  return;
+                }
+                returnedAgentRunTimeoutMeta = {
+                  agentRunTimeoutPhase: metadata.timeoutPhase,
+                  ...(metadata.providerStarted !== undefined
+                    ? { agentRunProviderStarted: metadata.providerStarted }
+                    : {}),
+                };
               },
               onModelSelected: (modelSelection) => {
                 updateChatRunProvider(context.chatAbortControllers, {
@@ -3534,6 +3555,14 @@ export const chatHandlers: GatewayRequestHandlers = {
               }
               const shouldBroadcastAgentError =
                 returnedAgentErrorPayloads.length > 0 && !broadcastedSourceReplyFinal;
+              const returnedAgentTimeoutMeta =
+                returnedAgentErrorPayloads
+                  .map((payload) => getReplyPayloadMetadata(payload))
+                  .find((metadata) => isHardAgentRunTimeoutPhase(metadata?.agentRunTimeoutPhase)) ??
+                returnedAgentRunTimeoutMeta;
+              const returnedAgentTimeoutPhase = returnedAgentTimeoutMeta?.agentRunTimeoutPhase;
+              const hasReturnedAgentHardTimeout =
+                isHardAgentRunTimeoutPhase(returnedAgentTimeoutPhase);
               if (shouldBroadcastAgentError) {
                 broadcastChatError({
                   context,
@@ -3543,25 +3572,43 @@ export const chatHandlers: GatewayRequestHandlers = {
                 });
               }
               if (!context.chatAbortedRuns.has(clientRunId)) {
-                const returnedAgentError = shouldBroadcastAgentError
+                const shouldStoreErrorResponse =
+                  shouldBroadcastAgentError && !hasReturnedAgentHardTimeout;
+                const returnedAgentError = shouldStoreErrorResponse
                   ? errorShape(
                       ErrorCodes.UNAVAILABLE,
                       returnedAgentErrorMessage ?? "agent returned an error payload",
                     )
                   : undefined;
+                const terminalSummary =
+                  returnedAgentErrorMessage ??
+                  (hasReturnedAgentHardTimeout
+                    ? "agent run timed out"
+                    : "agent returned an error payload");
                 setGatewayDedupeEntry({
                   dedupe: context.dedupe,
                   key: `chat:${clientRunId}`,
                   entry: {
                     ts: Date.now(),
-                    ok: !shouldBroadcastAgentError,
-                    payload: shouldBroadcastAgentError
-                      ? {
-                          runId: clientRunId,
-                          status: "error" as const,
-                          summary: returnedAgentErrorMessage ?? "agent returned an error payload",
-                        }
-                      : { runId: clientRunId, status: "ok" as const },
+                    ok: !shouldStoreErrorResponse,
+                    payload:
+                      shouldStoreErrorResponse || hasReturnedAgentHardTimeout
+                        ? {
+                            runId: clientRunId,
+                            status: returnedAgentTimeoutPhase
+                              ? ("timeout" as const)
+                              : ("error" as const),
+                            summary: terminalSummary,
+                            ...(returnedAgentTimeoutPhase
+                              ? { timeoutPhase: returnedAgentTimeoutPhase }
+                              : {}),
+                            ...(returnedAgentTimeoutMeta?.agentRunProviderStarted !== undefined
+                              ? {
+                                  providerStarted: returnedAgentTimeoutMeta.agentRunProviderStarted,
+                                }
+                              : {}),
+                          }
+                        : { runId: clientRunId, status: "ok" as const },
                     ...(returnedAgentError ? { error: returnedAgentError } : {}),
                   },
                 });

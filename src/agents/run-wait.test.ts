@@ -308,6 +308,53 @@ describe("waitForAgentRun", () => {
     });
   });
 
+  it("preserves timeout waits that carry blocked timeout attribution", async () => {
+    callGatewayMock.mockResolvedValue({
+      status: "timeout",
+      startedAt: 100,
+      endedAt: 200,
+      livenessState: "blocked",
+      error: "Request timed out before a response was generated.",
+      timeoutPhase: "provider",
+      providerStarted: true,
+    });
+
+    const result = await waitForAgentRun({ runId: "run-timeout-blocked", timeoutMs: 500 });
+
+    expect(result).toEqual({
+      status: "timeout",
+      error: "Request timed out before a response was generated.",
+      startedAt: 100,
+      endedAt: 200,
+      livenessState: "blocked",
+      timeoutPhase: "provider",
+      providerStarted: true,
+    });
+  });
+
+  it("normalizes blocked timeout waits without hard attribution to errors", async () => {
+    callGatewayMock.mockResolvedValue({
+      status: "timeout",
+      startedAt: 100,
+      endedAt: 200,
+      livenessState: "blocked",
+      error: "Context overflow: prompt too large for the model.",
+    });
+
+    const result = await waitForAgentRun({
+      runId: "run-timeout-blocked-unattributed",
+      timeoutMs: 500,
+    });
+
+    expect(result).toEqual({
+      status: "error",
+      error: "Context overflow: prompt too large for the model.",
+      startedAt: 100,
+      endedAt: 200,
+      livenessState: "blocked",
+    });
+  });
+
   it("normalizes aborted stop reasons to errors even when gateway reports ok", async () => {
     callGatewayMock.mockResolvedValue({
       status: "ok",
@@ -324,6 +371,50 @@ describe("waitForAgentRun", () => {
       startedAt: 100,
       endedAt: 200,
       stopReason: "aborted",
+    });
+  });
+
+  it("normalizes aborted timeout waits without hard attribution to errors", async () => {
+    callGatewayMock.mockResolvedValue({
+      status: "timeout",
+      startedAt: 100,
+      endedAt: 200,
+      stopReason: "aborted",
+    });
+
+    const result = await waitForAgentRun({ runId: "run-aborted-timeout", timeoutMs: 500 });
+
+    expect(result).toEqual({
+      status: "error",
+      error: "agent run aborted",
+      startedAt: 100,
+      endedAt: 200,
+      stopReason: "aborted",
+    });
+  });
+
+  it("does not synthesize aborted errors for hard timeout waits", async () => {
+    callGatewayMock.mockResolvedValue({
+      status: "timeout",
+      startedAt: 100,
+      endedAt: 200,
+      stopReason: "aborted",
+      timeoutPhase: "provider",
+      providerStarted: true,
+    });
+
+    const result = await waitForAgentRun({
+      runId: "run-aborted-hard-timeout",
+      timeoutMs: 500,
+    });
+
+    expect(result).toEqual({
+      status: "timeout",
+      startedAt: 100,
+      endedAt: 200,
+      stopReason: "aborted",
+      timeoutPhase: "provider",
+      providerStarted: true,
     });
   });
 });

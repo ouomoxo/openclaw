@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
+import { hasHardAgentRunTimeoutAttribution } from "../agents/run-timeout-attribution.js";
 import { shouldRouteCompletionThroughRequesterSession } from "../auto-reply/reply/completion-delivery-policy.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { onAgentEvent } from "../infra/agent-events.js";
@@ -1451,18 +1452,23 @@ function ensureListener() {
         const startedAt =
           typeof evt.data?.startedAt === "number" ? evt.data.startedAt : current.startedAt;
         const endedAt = typeof evt.data?.endedAt === "number" ? evt.data.endedAt : undefined;
+        const hardTimeout = hasHardAgentRunTimeoutAttribution(evt.data);
         if (startedAt) {
           patch.startedAt = startedAt;
         }
         if (phase === "start") {
           patch.status = "running";
         } else if (phase === "end") {
-          patch.status = evt.data?.aborted === true ? "timed_out" : "succeeded";
-          patch.endedAt = endedAt ?? now;
+          if (!(hardTimeout && current.runtime === "subagent")) {
+            patch.status = evt.data?.aborted === true || hardTimeout ? "timed_out" : "succeeded";
+            patch.endedAt = endedAt ?? now;
+          }
         } else if (phase === "error") {
-          patch.status = "failed";
-          patch.endedAt = endedAt ?? now;
-          patch.error = typeof evt.data?.error === "string" ? evt.data.error : current.error;
+          if (!(hardTimeout && current.runtime === "subagent")) {
+            patch.error = typeof evt.data?.error === "string" ? evt.data.error : current.error;
+            patch.status = hardTimeout ? "timed_out" : "failed";
+            patch.endedAt = endedAt ?? now;
+          }
         }
       } else if (evt.stream === "error") {
         patch.error = typeof evt.data?.error === "string" ? evt.data.error : current.error;
@@ -1652,8 +1658,17 @@ function updateTaskStateByRunId(params: {
   for (const current of matches) {
     const patch: Partial<TaskRecord> = {};
     const nextStatus = params.status ? normalizeTaskStatus(params.status) : current.status;
+    const correctsSubagentTimeout =
+      params.runtime === "subagent" &&
+      current.status === "timed_out" &&
+      nextStatus !== "timed_out" &&
+      isTerminalTaskStatus(nextStatus) &&
+      typeof current.endedAt === "number" &&
+      typeof params.endedAt === "number" &&
+      params.endedAt <= current.endedAt;
     if (
       params.status &&
+      !correctsSubagentTimeout &&
       !shouldApplyRunScopedStatusUpdate({
         currentStatus: current.status,
         nextStatus,
@@ -1676,6 +1691,8 @@ function updateTaskStateByRunId(params: {
     }
     if (params.error !== undefined) {
       patch.error = params.error;
+    } else if (nextStatus === "succeeded") {
+      patch.error = undefined;
     }
     if (params.progressSummary !== undefined) {
       patch.progressSummary = normalizeTaskSummary(params.progressSummary);

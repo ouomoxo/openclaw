@@ -13,9 +13,13 @@ export function normalizeBlockedLivenessWaitStatus<
   status: TStatus;
   livenessState?: unknown;
   error?: unknown;
+  preserveBlockedTimeout?: boolean;
 }): { status: TStatus | "error"; error?: string } {
   const error = typeof params.error === "string" ? params.error : undefined;
   if (!isBlockedLivenessState(params.livenessState)) {
+    return { status: params.status, error };
+  }
+  if (params.status === "timeout" && params.preserveBlockedTimeout === true) {
     return { status: params.status, error };
   }
   return {

@@ -2,9 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { MAX_TIMER_TIMEOUT_MS } from "../shared/number-coercion.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
-import { resolveAgentTimeoutMs, resolveAgentTimeoutSeconds } from "./timeout.js";
+import {
+  MAX_AGENT_TIMEOUT_MS,
+  resolveAgentTimeoutMs,
+  resolveAgentTimeoutSeconds,
+} from "./timeout.js";
 
 describe("getSubagentDepthFromSessionStore", () => {
   it("uses spawnDepth from the session store when available", () => {
@@ -144,12 +147,12 @@ describe("resolveAgentTimeoutMs", () => {
   });
 
   it("uses a timer-safe sentinel for no-timeout overrides", () => {
-    expect(resolveAgentTimeoutMs({ overrideSeconds: 0 })).toBe(MAX_TIMER_TIMEOUT_MS);
-    expect(resolveAgentTimeoutMs({ overrideMs: 0 })).toBe(MAX_TIMER_TIMEOUT_MS);
+    expect(resolveAgentTimeoutMs({ overrideSeconds: 0 })).toBe(MAX_AGENT_TIMEOUT_MS);
+    expect(resolveAgentTimeoutMs({ overrideMs: 0 })).toBe(MAX_AGENT_TIMEOUT_MS);
   });
 
   it("clamps very large timeout overrides to timer-safe values", () => {
-    expect(resolveAgentTimeoutMs({ overrideSeconds: 9_999_999 })).toBe(MAX_TIMER_TIMEOUT_MS);
-    expect(resolveAgentTimeoutMs({ overrideMs: 9_999_999_999 })).toBe(MAX_TIMER_TIMEOUT_MS);
+    expect(resolveAgentTimeoutMs({ overrideSeconds: 9_999_999 })).toBe(MAX_AGENT_TIMEOUT_MS);
+    expect(resolveAgentTimeoutMs({ overrideMs: 9_999_999_999 })).toBe(MAX_AGENT_TIMEOUT_MS);
   });
 });

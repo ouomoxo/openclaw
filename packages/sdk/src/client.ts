@@ -58,6 +58,10 @@ function runStatusFromWaitPayload(payload: unknown): RunResult["status"] {
       : {};
   const status = typeof record.status === "string" ? record.status.toLowerCase() : undefined;
   const stopReason = typeof record.stopReason === "string" ? record.stopReason.toLowerCase() : "";
+  const hardTimeoutPhase =
+    record.timeoutPhase === "preflight" ||
+    record.timeoutPhase === "provider" ||
+    record.timeoutPhase === "post_turn";
   const pendingError = record.pendingError === true;
   const hasTerminalTimeoutMetadata =
     readOptionalTimestamp(record.endedAt) !== undefined ||
@@ -65,6 +69,9 @@ function runStatusFromWaitPayload(payload: unknown): RunResult["status"] {
     stopReason.length > 0 ||
     typeof record.livenessState === "string" ||
     record.yielded === true;
+  if (status === "timeout" && hardTimeoutPhase) {
+    return stopReason === "auth-revoked" || stopReason === "user" ? "cancelled" : "timed_out";
+  }
   if (
     status === "aborted" ||
     status === "cancelled" ||
@@ -89,6 +96,7 @@ function runStatusFromWaitPayload(payload: unknown): RunResult["status"] {
       stopReason === "timeout" ||
       stopReason === "timed_out" ||
       record.aborted === true ||
+      hardTimeoutPhase ||
       hasTerminalTimeoutMetadata
     ) {
       return "timed_out";

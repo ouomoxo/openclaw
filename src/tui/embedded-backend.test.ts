@@ -1266,6 +1266,58 @@ describe("EmbeddedTuiBackend", () => {
     expect(finalContent[0]?.text).toBe("fallback answer");
   });
 
+  it("reports hard timeout lifecycle errors instead of user aborts", async () => {
+    const { EmbeddedTuiBackend } = await import("./embedded-backend.js");
+    const pending = deferred<{
+      payloads: Array<{ text: string; isError?: boolean }>;
+      meta: Record<string, unknown>;
+    }>();
+    agentCommandFromIngressMock.mockReturnValueOnce(pending.promise);
+
+    const backend = new EmbeddedTuiBackend();
+    const events: Array<{ event: string; payload: unknown }> = [];
+    backend.onEvent = (evt) => {
+      events.push({ event: evt.event, payload: evt.payload });
+    };
+
+    backend.start();
+    await backend.sendChat({
+      sessionKey: "agent:main:main",
+      message: "timeout",
+      runId: "run-local-hard-timeout",
+    });
+
+    registeredListener?.({
+      runId: "run-local-hard-timeout",
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        timeoutPhase: "provider",
+        error: "Request timed out before a response was generated.",
+      },
+    });
+    pending.resolve({
+      payloads: [
+        {
+          text: "Request timed out before a response was generated.",
+          isError: true,
+        },
+      ],
+      meta: { aborted: true, timeoutPhase: "provider" },
+    });
+    await flushMicrotasks();
+    vi.advanceTimersByTime(15_001);
+
+    const chatPayloads = events
+      .filter((entry) => entry.event === "chat")
+      .map((entry) => entry.payload as { state?: string; errorMessage?: string });
+    expect(chatPayloads.some((payload) => payload.state === "aborted")).toBe(false);
+    expect(chatPayloads.at(-1)).toMatchObject({
+      state: "error",
+      errorMessage: "Request timed out before a response was generated.",
+    });
+  });
+
   it("emits side-result events for local /btw runs", async () => {
     const { EmbeddedTuiBackend } = await import("./embedded-backend.js");
     agentCommandFromIngressMock.mockResolvedValueOnce({

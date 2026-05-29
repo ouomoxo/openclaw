@@ -197,6 +197,201 @@ describe("startAcpSpawnParentStreamRelay", () => {
     relay.dispose();
   });
 
+  it("relays hard timeout lifecycle ends as failures instead of completions", () => {
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "run-timeout",
+      parentSessionKey: "agent:main:main",
+      childSessionKey: "agent:codex:acp:child-timeout",
+      agentId: "codex",
+      streamFlushMs: 10,
+      noOutputNoticeMs: 120_000,
+    });
+
+    emitAgentEvent({
+      runId: "run-timeout",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        aborted: true,
+        timeoutPhase: "provider",
+        providerStarted: true,
+        error: "Request timed out before a response was generated.",
+        startedAt: 1_000,
+        endedAt: 9_000,
+      },
+    });
+
+    const texts = collectedTexts();
+    expectTextWithFragment(texts, "codex run timed out");
+    expectNoTextWithFragment(texts, "codex run completed");
+    relay.dispose();
+  });
+
+  it("does not stop relaying on transient aborted lifecycle ends", () => {
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "run-transient-abort",
+      parentSessionKey: "agent:main:main",
+      childSessionKey: "agent:codex:acp:child-transient-abort",
+      agentId: "codex",
+      streamFlushMs: 10,
+      noOutputNoticeMs: 120_000,
+    });
+
+    emitAgentEvent({
+      runId: "run-transient-abort",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        aborted: true,
+        startedAt: 1_000,
+        endedAt: 5_000,
+      },
+    });
+    emitAgentEvent({
+      runId: "run-transient-abort",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: 1_000,
+        endedAt: 6_000,
+      },
+    });
+
+    const texts = collectedTexts();
+    expectTextWithFragment(texts, "codex run completed");
+    expectNoTextWithFragment(texts, "codex run stopped");
+    relay.dispose();
+  });
+
+  it("relays terminal aborted lifecycle ends as stopped runs", () => {
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "run-terminal-abort",
+      parentSessionKey: "agent:main:main",
+      childSessionKey: "agent:codex:acp:child-terminal-abort",
+      agentId: "codex",
+      streamFlushMs: 10,
+      noOutputNoticeMs: 120_000,
+    });
+
+    emitAgentEvent({
+      runId: "run-terminal-abort",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        aborted: true,
+        stopReason: "aborted",
+        error: "agent run aborted",
+        startedAt: 1_000,
+        endedAt: 5_000,
+      },
+    });
+    emitAgentEvent({
+      runId: "run-terminal-abort",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: 1_000,
+        endedAt: 6_000,
+      },
+    });
+
+    const texts = collectedTexts();
+    expectTextWithFragment(texts, "codex run stopped");
+    expectNoTextWithFragment(texts, "codex run completed");
+    relay.dispose();
+  });
+
+  it("relays cancelled lifecycle stop reasons as stopped runs instead of timeout grace", () => {
+    for (const stopReason of ["rpc", "user", "stop"]) {
+      enqueueSystemEventMock.mockClear();
+      const relay = startAcpSpawnParentStreamRelay({
+        runId: `run-cancelled-${stopReason}`,
+        parentSessionKey: "agent:main:main",
+        childSessionKey: `agent:codex:acp:child-cancelled-${stopReason}`,
+        agentId: "codex",
+        streamFlushMs: 10,
+        noOutputNoticeMs: 120_000,
+      });
+
+      emitAgentEvent({
+        runId: `run-cancelled-${stopReason}`,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          aborted: true,
+          stopReason,
+          error: "agent run cancelled",
+          startedAt: 1_000,
+          endedAt: 5_000,
+        },
+      });
+      vi.advanceTimersByTime(15_000);
+
+      const texts = collectedTexts();
+      expectTextWithFragment(texts, "codex run stopped");
+      expectNoTextWithFragment(texts, "codex run timed out");
+      expectNoTextWithFragment(texts, "codex run completed");
+      relay.dispose();
+    }
+  });
+
+  it("surfaces unresolved aborted lifecycle ends as timeouts after grace", () => {
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "run-abort-timeout-grace",
+      parentSessionKey: "agent:main:main",
+      childSessionKey: "agent:codex:acp:child-abort-timeout-grace",
+      agentId: "codex",
+      streamFlushMs: 10,
+      noOutputNoticeMs: 120_000,
+    });
+
+    emitAgentEvent({
+      runId: "run-abort-timeout-grace",
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        aborted: true,
+        startedAt: 1_000,
+        endedAt: 5_000,
+      },
+    });
+
+    vi.advanceTimersByTime(14_999);
+    expectNoTextWithFragment(collectedTexts(), "codex run timed out");
+
+    vi.advanceTimersByTime(1);
+    const texts = collectedTexts();
+    expectTextWithFragment(texts, "codex run timed out");
+    expectNoTextWithFragment(texts, "codex run completed");
+    relay.dispose();
+  });
+
+  it("relays hard timeout lifecycle errors as timeout failures", () => {
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "run-timeout-error",
+      parentSessionKey: "agent:main:main",
+      childSessionKey: "agent:codex:acp:child-timeout-error",
+      agentId: "codex",
+      streamFlushMs: 10,
+      noOutputNoticeMs: 120_000,
+    });
+
+    emitAgentEvent({
+      runId: "run-timeout-error",
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        timeoutPhase: "provider",
+        error: "Request timed out before a response was generated.",
+      },
+    });
+
+    const texts = collectedTexts();
+    expectTextWithFragment(texts, "codex run timed out");
+    expectNoTextWithFragment(texts, "codex run failed");
+    relay.dispose();
+  });
+
   it("remaps cron-run parent session keys while relaying stream events", () => {
     const relay = startAcpSpawnParentStreamRelay({
       runId: "run-cron",

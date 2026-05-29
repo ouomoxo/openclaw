@@ -490,6 +490,274 @@ describe("task-registry", () => {
     });
   });
 
+  it("updates task status from hard-timeout lifecycle end events", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryMemoryForTest();
+
+      createTaskRecord({
+        runtime: "acp",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:acp:child-timeout",
+        runId: "run-hard-timeout",
+        task: "Do the timed out thing",
+        status: "running",
+        deliveryStatus: "not_applicable",
+        startedAt: 100,
+      });
+
+      emitAgentEvent({
+        runId: "run-hard-timeout",
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          timeoutPhase: "provider",
+          endedAt: 250,
+        },
+      });
+
+      expectRecordFields(requireTaskByRunId("run-hard-timeout"), {
+        runtime: "acp",
+        status: "timed_out",
+        endedAt: 250,
+      });
+    });
+  });
+
+  it("updates task status from hard-timeout lifecycle error events", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryMemoryForTest();
+
+      createTaskRecord({
+        runtime: "acp",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:acp:child-timeout-error",
+        runId: "run-hard-timeout-error",
+        task: "Do the timed out thing",
+        status: "running",
+        deliveryStatus: "not_applicable",
+        startedAt: 100,
+      });
+
+      emitAgentEvent({
+        runId: "run-hard-timeout-error",
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          timeoutPhase: "provider",
+          error: "Request timed out before a response was generated.",
+          endedAt: 250,
+        },
+      });
+
+      expectRecordFields(requireTaskByRunId("run-hard-timeout-error"), {
+        runtime: "acp",
+        status: "timed_out",
+        endedAt: 250,
+        error: "Request timed out before a response was generated.",
+      });
+    });
+  });
+
+  it("leaves subagent hard-timeout lifecycle events correctable by the subagent finalizer", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryMemoryForTest();
+
+      createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:child-timeout-correctable",
+        runId: "run-subagent-correctable-timeout",
+        task: "Do the correctable timed out thing",
+        status: "running",
+        deliveryStatus: "not_applicable",
+        startedAt: 100,
+      });
+
+      emitAgentEvent({
+        runId: "run-subagent-correctable-timeout",
+        sessionKey: "agent:main:subagent:child-timeout-correctable",
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          timeoutPhase: "provider",
+          error: "Request timed out before a response was generated.",
+          endedAt: 250,
+        },
+      });
+
+      expectRecordFields(requireTaskByRunId("run-subagent-correctable-timeout"), {
+        runtime: "subagent",
+        status: "running",
+        endedAt: undefined,
+        error: undefined,
+      });
+
+      markTaskTerminalByRunId({
+        runId: "run-subagent-correctable-timeout",
+        runtime: "subagent",
+        sessionKey: "agent:main:subagent:child-timeout-correctable",
+        status: "succeeded",
+        endedAt: 240,
+        lastEventAt: 240,
+        terminalSummary: "Finished before timeout.",
+      });
+
+      expectRecordFields(requireTaskByRunId("run-subagent-correctable-timeout"), {
+        runtime: "subagent",
+        status: "succeeded",
+        endedAt: 240,
+        error: undefined,
+        terminalSummary: "Finished before timeout.",
+      });
+    });
+  });
+
+  it("allows subagent finalization to correct a task timeout to success", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryMemoryForTest();
+
+      createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:child-timeout-corrected",
+        runId: "run-subagent-timeout-corrected",
+        task: "Do the corrected timed out thing",
+        status: "running",
+        deliveryStatus: "not_applicable",
+        startedAt: 100,
+      });
+
+      markTaskTerminalByRunId({
+        runId: "run-subagent-timeout-corrected",
+        runtime: "subagent",
+        sessionKey: "agent:main:subagent:child-timeout-corrected",
+        status: "timed_out",
+        endedAt: 260,
+        lastEventAt: 260,
+        error: "Request timed out before a response was generated.",
+      });
+
+      markTaskTerminalByRunId({
+        runId: "run-subagent-timeout-corrected",
+        runtime: "subagent",
+        sessionKey: "agent:main:subagent:child-timeout-corrected",
+        status: "succeeded",
+        endedAt: 240,
+        lastEventAt: 240,
+        terminalSummary: "Finished before timeout.",
+      });
+
+      expectRecordFields(requireTaskByRunId("run-subagent-timeout-corrected"), {
+        runtime: "subagent",
+        status: "succeeded",
+        endedAt: 240,
+        error: undefined,
+        terminalSummary: "Finished before timeout.",
+      });
+    });
+  });
+
+  it("allows earlier subagent failures to correct a task timeout", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryMemoryForTest();
+
+      createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:child-failed-before-timeout",
+        runId: "run-subagent-failed-before-timeout",
+        task: "Do the failed before timeout thing",
+        status: "running",
+        deliveryStatus: "not_applicable",
+        startedAt: 100,
+      });
+
+      markTaskTerminalByRunId({
+        runId: "run-subagent-failed-before-timeout",
+        runtime: "subagent",
+        sessionKey: "agent:main:subagent:child-failed-before-timeout",
+        status: "timed_out",
+        endedAt: 260,
+        lastEventAt: 260,
+        error: "Request timed out before a response was generated.",
+      });
+
+      markTaskTerminalByRunId({
+        runId: "run-subagent-failed-before-timeout",
+        runtime: "subagent",
+        sessionKey: "agent:main:subagent:child-failed-before-timeout",
+        status: "failed",
+        endedAt: 240,
+        lastEventAt: 240,
+        error: "Child failed before timeout.",
+      });
+
+      expectRecordFields(requireTaskByRunId("run-subagent-failed-before-timeout"), {
+        runtime: "subagent",
+        status: "failed",
+        endedAt: 240,
+        error: "Child failed before timeout.",
+      });
+    });
+  });
+
+  it("keeps subagent task timeouts authoritative over late successes", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryMemoryForTest();
+
+      createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:child-late-success",
+        runId: "run-subagent-late-success",
+        task: "Do the late success thing",
+        status: "running",
+        deliveryStatus: "not_applicable",
+        startedAt: 100,
+      });
+
+      markTaskTerminalByRunId({
+        runId: "run-subagent-late-success",
+        runtime: "subagent",
+        sessionKey: "agent:main:subagent:child-late-success",
+        status: "timed_out",
+        endedAt: 260,
+        lastEventAt: 260,
+        error: "Request timed out before a response was generated.",
+      });
+
+      markTaskTerminalByRunId({
+        runId: "run-subagent-late-success",
+        runtime: "subagent",
+        sessionKey: "agent:main:subagent:child-late-success",
+        status: "succeeded",
+        endedAt: 280,
+        lastEventAt: 280,
+        terminalSummary: "Finished after timeout.",
+      });
+
+      expectRecordFields(requireTaskByRunId("run-subagent-late-success"), {
+        runtime: "subagent",
+        status: "timed_out",
+        endedAt: 260,
+        error: "Request timed out before a response was generated.",
+        terminalSummary: undefined,
+      });
+    });
+  });
+
   it("ignores late agent events for operator-cancelled tasks", async () => {
     await withTaskRegistryTempDir(async (root) => {
       process.env.OPENCLAW_STATE_DIR = root;

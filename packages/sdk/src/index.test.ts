@@ -230,6 +230,23 @@ describe("OpenClaw SDK", () => {
     expect(result.error).toBeUndefined();
   });
 
+  it("maps hard-timeout-attributed wait snapshots to timed_out", async () => {
+    const transport = new FakeTransport({
+      "agent.wait": {
+        status: "timeout",
+        runId: "run_timeout_phase",
+        timeoutPhase: "provider",
+        stopReason: "rpc",
+      },
+    });
+    const oc = new OpenClaw({ transport });
+
+    const result = await oc.runs.wait("run_timeout_phase");
+
+    expect(result.runId).toBe("run_timeout_phase");
+    expect(result.status).toBe("timed_out");
+  });
+
   it("splits provider-qualified model refs and rejects unsupported run options", async () => {
     const transport = new FakeTransport({
       agent: { status: "accepted", runId: "run_openrouter" },
@@ -1056,5 +1073,37 @@ describe("OpenClaw SDK", () => {
     expect(timedOut.type).toBe("run.timed_out");
     expect(timedOut.runId).toBe("run_1");
     expect(timedOut.data).toEqual({ phase: "end", stopReason: "timeout" });
+
+    const attributedTimeout = normalizeGatewayEvent({
+      event: "agent",
+      seq: 8,
+      payload: {
+        runId: "run_1",
+        stream: "lifecycle",
+        ts,
+        data: { phase: "end", timeoutPhase: "provider", stopReason: "rpc" },
+      },
+    });
+    expect(attributedTimeout.type).toBe("run.timed_out");
+    expect(attributedTimeout.runId).toBe("run_1");
+    expect(attributedTimeout.data).toEqual({
+      phase: "end",
+      timeoutPhase: "provider",
+      stopReason: "rpc",
+    });
+
+    const attributedTimeoutError = normalizeGatewayEvent({
+      event: "agent",
+      seq: 9,
+      payload: {
+        runId: "run_1",
+        stream: "lifecycle",
+        ts,
+        data: { phase: "error", timeoutPhase: "provider" },
+      },
+    });
+    expect(attributedTimeoutError.type).toBe("run.timed_out");
+    expect(attributedTimeoutError.runId).toBe("run_1");
+    expect(attributedTimeoutError.data).toEqual({ phase: "error", timeoutPhase: "provider" });
   });
 });

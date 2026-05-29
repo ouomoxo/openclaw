@@ -315,6 +315,68 @@ describe("applySubagentWaitOutcome", () => {
     });
   });
 
+  it("keeps timeout wait snapshots as timeouts when liveness is blocked", () => {
+    const applied = applySubagentWaitOutcome({
+      wait: {
+        status: "timeout",
+        startedAt: 100,
+        endedAt: 150,
+        livenessState: "blocked",
+        timeoutPhase: "provider",
+        error: "Request timed out before a response was generated.",
+      },
+      outcome: undefined,
+    });
+
+    expect(applied.outcome).toEqual({
+      status: "timeout",
+      startedAt: 100,
+      endedAt: 150,
+      elapsedMs: 50,
+    });
+  });
+
+  it("treats blocked timeout wait snapshots without hard attribution as errors", () => {
+    const applied = applySubagentWaitOutcome({
+      wait: {
+        status: "timeout",
+        startedAt: 100,
+        endedAt: 150,
+        livenessState: "blocked",
+        error: "Context overflow: prompt too large for the model.",
+      },
+      outcome: undefined,
+    });
+
+    expect(applied.outcome).toEqual({
+      status: "error",
+      error: "Context overflow: prompt too large for the model.",
+      startedAt: 100,
+      endedAt: 150,
+      elapsedMs: 50,
+    });
+  });
+
+  it("treats aborted timeout wait snapshots without hard attribution as terminated errors", () => {
+    const applied = applySubagentWaitOutcome({
+      wait: {
+        status: "timeout",
+        startedAt: 100,
+        endedAt: 150,
+        stopReason: "aborted",
+      },
+      outcome: undefined,
+    });
+
+    expect(applied.outcome).toEqual({
+      status: "error",
+      error: "subagent run terminated",
+      startedAt: 100,
+      endedAt: 150,
+      elapsedMs: 50,
+    });
+  });
+
   it("treats aborted ok wait snapshots as terminated subagent errors", () => {
     const applied = applySubagentWaitOutcome({
       wait: {

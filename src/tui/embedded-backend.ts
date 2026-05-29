@@ -9,6 +9,7 @@ import {
   buildConfiguredModelCatalog,
   resolveThinkingDefault,
 } from "../agents/model-selection.js";
+import { hasHardAgentRunTimeoutAttribution } from "../agents/run-timeout-attribution.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { updateSessionStore } from "../config/sessions.js";
@@ -763,7 +764,12 @@ export class EmbeddedTuiBackend implements TuiBackend {
     }
 
     const phase = lifecyclePhase;
+    const hardTimeout = hasHardAgentRunTimeoutAttribution(evt.data);
     const aborted = evt.data?.aborted === true || run.controller.signal.aborted;
+    const timeoutErrorMessage =
+      typeof evt.data?.error === "string"
+        ? evt.data.error
+        : "Request timed out before a response was generated.";
     if (phase === "finishing") {
       run.finishing = true;
       run.markQueuedRunReady();
@@ -773,6 +779,11 @@ export class EmbeddedTuiBackend implements TuiBackend {
     }
     if (phase === "end") {
       run.finishing = false;
+      if (hardTimeout) {
+        run.buffer = "";
+        this.scheduleChatError(evt.runId, run, timeoutErrorMessage);
+        return;
+      }
       if (aborted) {
         this.emitChatAborted(evt.runId, run);
         return;
@@ -786,6 +797,11 @@ export class EmbeddedTuiBackend implements TuiBackend {
 
     if (phase === "error") {
       run.finishing = false;
+      if (hardTimeout) {
+        run.buffer = "";
+        this.scheduleChatError(evt.runId, run, timeoutErrorMessage);
+        return;
+      }
       if (aborted) {
         this.emitChatAborted(evt.runId, run);
         return;
@@ -852,6 +868,15 @@ export class EmbeddedTuiBackend implements TuiBackend {
       );
       const run = this.runs.get(params.runId);
       if (!run) {
+        return;
+      }
+      if (hasHardAgentRunTimeoutAttribution(result?.meta)) {
+        run.buffer = "";
+        this.emitChatError(
+          params.runId,
+          run,
+          payloadText(result?.payloads) || "Request timed out before a response was generated.",
+        );
         return;
       }
       if (params.controller.signal.aborted || result?.meta?.aborted === true) {

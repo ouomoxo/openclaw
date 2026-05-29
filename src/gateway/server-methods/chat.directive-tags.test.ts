@@ -59,6 +59,10 @@ const mockState = vi.hoisted(() => ({
   triggerAgentRunStart: false,
   triggerUserMessagePersisted: false,
   runtimeUserMessagePersistencePending: null as Promise<void> | null,
+  agentRunTerminalMetadata: null as {
+    timeoutPhase?: "preflight" | "provider" | "post_turn";
+    providerStarted?: boolean;
+  } | null,
   onAfterAgentRunStart: null as (() => void) | null,
   agentRunId: "run-agent-1",
   sessionEntry: {} as Record<string, unknown>,
@@ -201,6 +205,10 @@ vi.mock("../../auto-reply/dispatch.js", () => ({
       };
       replyOptions?: {
         onAgentRunStart?: (runId: string) => void;
+        onAgentRunTerminalMetadata?: (metadata: {
+          timeoutPhase?: "preflight" | "provider" | "post_turn";
+          providerStarted?: boolean;
+        }) => void;
         userTurnTranscriptRecorder?: {
           message?: unknown;
           resolveMessage?: () => Promise<unknown>;
@@ -224,6 +232,9 @@ vi.mock("../../auto-reply/dispatch.js", () => ({
       if (mockState.triggerAgentRunStart) {
         params.replyOptions?.onAgentRunStart?.(mockState.agentRunId);
         mockState.onAfterAgentRunStart?.();
+      }
+      if (mockState.agentRunTerminalMetadata) {
+        params.replyOptions?.onAgentRunTerminalMetadata?.(mockState.agentRunTerminalMetadata);
       }
       if (mockState.triggerUserMessagePersisted) {
         params.replyOptions?.userTurnTranscriptRecorder?.markRuntimePersisted({
@@ -765,6 +776,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     mockState.triggerAgentRunStart = false;
     mockState.triggerUserMessagePersisted = false;
     mockState.runtimeUserMessagePersistencePending = null;
+    mockState.agentRunTerminalMetadata = null;
     mockState.onAfterAgentRunStart = null;
     mockState.agentRunId = "run-agent-1";
     mockState.sessionEntry = {};
@@ -1921,6 +1933,119 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
         (update.message as { role?: unknown }).role === "assistant",
     );
     expect(assistantUpdates).toStrictEqual([]);
+  });
+
+  it("keeps returned hard-timeout agent payloads as timeout dedupe snapshots", async () => {
+    createTranscriptFixture("openclaw-chat-send-agent-returned-timeout-");
+    const errorMessage = "Request timed out before a response was generated.";
+    mockState.triggerAgentRunStart = true;
+    mockState.dispatchedReplies = [
+      {
+        kind: "final",
+        payload: setReplyPayloadMetadata(
+          {
+            text: errorMessage,
+            isError: true,
+          },
+          {
+            agentRunTimeoutPhase: "provider",
+            agentRunProviderStarted: true,
+          },
+        ),
+      },
+    ];
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    const broadcast = await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-agent-returned-timeout",
+      message: "please keep working",
+    });
+
+    expect(broadcast).toMatchObject({
+      runId: "idem-agent-returned-timeout",
+      sessionKey: "main",
+      state: "error",
+      errorMessage,
+    });
+    const dedupe = context.dedupe.get("chat:idem-agent-returned-timeout");
+    expect(dedupe?.ok).toBe(true);
+    expect(dedupe?.payload).toMatchObject({
+      runId: "idem-agent-returned-timeout",
+      status: "timeout",
+      summary: errorMessage,
+      timeoutPhase: "provider",
+      providerStarted: true,
+    });
+    const retryRespond = vi.fn();
+    await runNonStreamingChatSend({
+      context,
+      respond: retryRespond,
+      idempotencyKey: "idem-agent-returned-timeout",
+      message: "please keep working",
+      waitFor: "none",
+    });
+    expect(retryRespond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        runId: "idem-agent-returned-timeout",
+        status: "timeout",
+        timeoutPhase: "provider",
+      }),
+      undefined,
+      { cached: true },
+    );
+  });
+
+  it("keeps run-level hard-timeout metadata as timeout dedupe without returned error payloads", async () => {
+    createTranscriptFixture("openclaw-chat-send-agent-run-timeout-meta-");
+    mockState.triggerAgentRunStart = true;
+    mockState.agentRunTerminalMetadata = {
+      timeoutPhase: "post_turn",
+      providerStarted: true,
+    };
+    mockState.dispatchedReplies = [];
+    mockState.finalPayload = { text: undefined };
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-agent-run-timeout-meta",
+      message: "please keep working",
+      waitFor: "dedupe",
+    });
+
+    const dedupe = context.dedupe.get("chat:idem-agent-run-timeout-meta");
+    expect(dedupe?.ok).toBe(true);
+    expect(dedupe?.payload).toMatchObject({
+      runId: "idem-agent-run-timeout-meta",
+      status: "timeout",
+      summary: "agent run timed out",
+      timeoutPhase: "post_turn",
+      providerStarted: true,
+    });
+    const retryRespond = vi.fn();
+    await runNonStreamingChatSend({
+      context,
+      respond: retryRespond,
+      idempotencyKey: "idem-agent-run-timeout-meta",
+      message: "please keep working",
+      waitFor: "none",
+    });
+    expect(retryRespond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        runId: "idem-agent-run-timeout-meta",
+        status: "timeout",
+        timeoutPhase: "post_turn",
+      }),
+      undefined,
+      { cached: true },
+    );
   });
 
   it("keeps visible text on non-agent TTS final media because no model transcript exists", async () => {

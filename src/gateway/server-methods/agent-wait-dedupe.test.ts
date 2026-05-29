@@ -123,6 +123,7 @@ describe("agent wait dedupe helper", () => {
         status: "timeout",
         startedAt: 100,
         endedAt: 200,
+        stopReason: "aborted",
         result: {
           meta: {
             timeoutPhase: "provider",
@@ -142,6 +143,42 @@ describe("agent wait dedupe helper", () => {
       startedAt: 100,
       endedAt: 200,
       error: undefined,
+      stopReason: "aborted",
+      timeoutPhase: "provider",
+      providerStarted: true,
+    });
+  });
+
+  it("maps terminal chat hard-timeout error entries to timeout snapshots", () => {
+    const dedupe = new Map();
+    const runId = "run-chat-provider-timeout";
+
+    setRunEntry({
+      dedupe,
+      kind: "chat",
+      runId,
+      ok: false,
+      payload: {
+        runId,
+        status: "error",
+        summary: "Request timed out before a response was generated.",
+        timeoutPhase: "provider",
+        providerStarted: true,
+      },
+    });
+
+    expect(
+      readTerminalSnapshotFromGatewayDedupe({
+        dedupe,
+        runId,
+      }),
+    ).toEqual({
+      status: "timeout",
+      startedAt: undefined,
+      endedAt: expect.any(Number),
+      error: "Request timed out before a response was generated.",
+      stopReason: undefined,
+      livenessState: undefined,
       timeoutPhase: "provider",
       providerStarted: true,
     });
@@ -158,6 +195,42 @@ describe("agent wait dedupe helper", () => {
       payload: {
         runId,
         status: "ok",
+        startedAt: 100,
+        endedAt: 200,
+        error: "Context overflow: prompt too large for the model.",
+        result: {
+          meta: {
+            livenessState: "blocked",
+          },
+        },
+      },
+    });
+
+    expect(
+      readTerminalSnapshotFromGatewayDedupe({
+        dedupe,
+        runId,
+      }),
+    ).toEqual({
+      status: "error",
+      startedAt: 100,
+      endedAt: 200,
+      error: "Context overflow: prompt too large for the model.",
+      livenessState: "blocked",
+    });
+  });
+
+  it("normalizes blocked timeout snapshots without hard attribution to errors", () => {
+    const dedupe = new Map();
+    const runId = "run-blocked-timeout-agent";
+
+    setRunEntry({
+      dedupe,
+      kind: "agent",
+      runId,
+      payload: {
+        runId,
+        status: "timeout",
         startedAt: 100,
         endedAt: 200,
         error: "Context overflow: prompt too large for the model.",

@@ -269,7 +269,10 @@ export async function runSubagentAnnounceFlow(params: {
     const settleTimeoutMs = Math.min(Math.max(params.timeoutMs, 1), 120_000);
     let reply = params.roundOneReply;
     let outcome: SubagentRunOutcome | undefined = params.outcome;
-    if (childSessionId && isEmbeddedAgentRunActive(childSessionId)) {
+    // A timeout outcome is already the terminal contract. Waiting for the
+    // still-unwinding embedded run lets command-lane safety timers preempt delivery.
+    const terminalTimeoutOutcome = params.outcome?.status === "timeout";
+    if (childSessionId && !terminalTimeoutOutcome && isEmbeddedAgentRunActive(childSessionId)) {
       const settled = await waitForEmbeddedAgentRunEnd(childSessionId, settleTimeoutMs);
       if (!settled && isEmbeddedAgentRunActive(childSessionId)) {
         shouldDeleteChildSession = false;

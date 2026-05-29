@@ -5,7 +5,9 @@ import { normalizeOptionalString } from "../shared/string-coerce.js";
 
 type MockFn = (...args: unknown[]) => unknown;
 type MockImplementationTarget = {
-  mockImplementation: (implementation: (opts: { method?: string }) => Promise<unknown>) => unknown;
+  mockImplementation: (
+    implementation: (opts: { method?: string; params?: unknown }) => Promise<unknown>,
+  ) => unknown;
 };
 type SessionStore = Record<string, Record<string, unknown>>;
 type SessionStoreMutator = (store: SessionStore) => unknown;
@@ -52,7 +54,15 @@ export function setupAcceptedSubagentGatewayMock(callGatewayMock: MockImplementa
       return { ok: true };
     }
     if (opts.method === "agent") {
-      return { runId: "run-1", status: "accepted", acceptedAt: 1000 };
+      const paramsRecord =
+        opts && typeof opts === "object" && "params" in opts && opts.params
+          ? (opts.params as { idempotencyKey?: unknown })
+          : {};
+      const runId =
+        typeof paramsRecord.idempotencyKey === "string" && paramsRecord.idempotencyKey.trim()
+          ? paramsRecord.idempotencyKey
+          : "run-1";
+      return { runId, status: "accepted", acceptedAt: 1000 };
     }
     return {};
   });
@@ -124,6 +134,9 @@ export async function loadSubagentSpawnModuleForTest(params: {
   resolveParentForkDecisionMock?: MockFn;
   pruneLegacyStoreKeysMock?: MockFn;
   registerSubagentRunMock?: MockFn;
+  armSubagentRunTimeoutMock?: MockFn;
+  releaseSubagentRunMock?: MockFn;
+  discardFailedSubagentSpawnRunMock?: MockFn;
   emitSessionLifecycleEventMock?: MockFn;
   hookRunner?: HookRunner;
   resolveAgentConfig?: (cfg: Record<string, unknown>, agentId: string) => unknown;
@@ -131,6 +144,7 @@ export async function loadSubagentSpawnModuleForTest(params: {
   resolveSubagentSpawnModelSelection?: () => string | undefined;
   getSubagentDepthFromSessionStore?: (sessionKey: string, opts?: unknown) => number;
   countActiveRunsForSession?: (sessionKey: string) => number;
+  listSubagentRunsForRequesterMock?: MockFn;
   resolveSandboxRuntimeStatus?: (params: {
     cfg?: Record<string, unknown>;
     sessionKey?: string;
@@ -265,9 +279,14 @@ export async function loadSubagentSpawnModuleForTest(params: {
   }));
 
   vi.doMock("./subagent-registry.js", () => ({
+    SUBAGENT_RUN_TIMEOUT_RECONCILIATION_GRACE_MS: 15_000,
     countActiveRunsForSession: params.countActiveRunsForSession ?? (() => 0),
+    listSubagentRunsForRequester: params.listSubagentRunsForRequesterMock ?? (() => []),
     registerSubagentRun:
       params.registerSubagentRunMock ?? vi.fn((_record: Record<string, unknown>) => undefined),
+    armSubagentRunTimeout: params.armSubagentRunTimeoutMock ?? vi.fn(),
+    releaseSubagentRun: params.releaseSubagentRunMock ?? vi.fn(),
+    discardFailedSubagentSpawnRun: params.discardFailedSubagentSpawnRunMock ?? vi.fn(),
     resetSubagentRegistryForTests,
   }));
 

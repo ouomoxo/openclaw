@@ -242,6 +242,45 @@ describe("acp translator stop reason mapping", () => {
     );
   });
 
+  it("reconciles a missed hard timeout event on reconnect via agent.wait", async () => {
+    let runId: string | undefined;
+    const request = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === "chat.send") {
+        runId = params?.idempotencyKey as string | undefined;
+        return {};
+      }
+      if (method === "agent.wait") {
+        return {
+          status: "timeout",
+          timeoutPhase: "provider",
+          error: "Request timed out before a response was generated.",
+        };
+      }
+      return {};
+    }) as GatewayClient["request"];
+    const { agent, sessionId } = createSessionAgentHarness(request);
+    const promptPromise = promptAgent(agent, sessionId);
+
+    await vi.waitFor(() => {
+      expect(runId).toBeTypeOf("string");
+      expect(runId).not.toBe("");
+    });
+    const capturedRunId = requireValue(runId, "chat.send run id");
+
+    agent.handleGatewayDisconnect("1006: connection lost");
+    agent.handleGatewayReconnect();
+
+    await expect(promptPromise).resolves.toEqual({ stopReason: "end_turn" });
+    expect(request).toHaveBeenCalledWith(
+      "agent.wait",
+      {
+        runId: capturedRunId,
+        timeoutMs: 0,
+      },
+      { timeoutMs: null },
+    );
+  });
+
   it("rechecks accepted prompts at the disconnect deadline after reconnect timeout", async () => {
     vi.useFakeTimers();
     try {

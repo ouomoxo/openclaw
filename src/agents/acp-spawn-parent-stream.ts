@@ -16,11 +16,14 @@ import { asFiniteNumber } from "../shared/number-coercion.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { recordTaskRunProgressByRunId } from "../tasks/detached-task-runtime.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import { isAbortedAgentStopReason } from "./run-termination.js";
+import { hasHardAgentRunTimeoutAttribution } from "./run-timeout-attribution.js";
 
 const DEFAULT_STREAM_FLUSH_MS = 2_500;
 const DEFAULT_NO_OUTPUT_NOTICE_MS = 60_000;
 const DEFAULT_NO_OUTPUT_POLL_MS = 15_000;
 const DEFAULT_MAX_RELAY_LIFETIME_MS = 6 * 60 * 60 * 1000;
+const ABORTED_END_RELAY_GRACE_MS = 15_000;
 const STREAM_BUFFER_MAX_CHARS = 4_000;
 const STREAM_SNIPPET_MAX_CHARS = 220;
 
@@ -43,6 +46,20 @@ function normalizeStringArray(value: unknown): string[] {
     return [];
   }
   return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function isCancelledAgentStopReason(value: unknown): boolean {
+  const stopReason = normalizeOptionalString(value)?.toLowerCase();
+  return (
+    isAbortedAgentStopReason(stopReason) ||
+    stopReason === "cancelled" ||
+    stopReason === "canceled" ||
+    stopReason === "killed" ||
+    stopReason === "auth-revoked" ||
+    stopReason === "rpc" ||
+    stopReason === "user" ||
+    stopReason === "stop"
+  );
 }
 
 function formatProxyEnvSummary(keys: string[]): string {
@@ -267,6 +284,7 @@ export function startAcpSpawnParentStreamRelay(params: {
   let proxyEnvKeysAtPrompt: string[] = [];
   let flushTimer: NodeJS.Timeout | undefined;
   let relayLifetimeTimer: NodeJS.Timeout | undefined;
+  let abortedEndTimer: NodeJS.Timeout | undefined;
 
   const clearFlushTimer = () => {
     if (!flushTimer) {
@@ -281,6 +299,13 @@ export function startAcpSpawnParentStreamRelay(params: {
     }
     clearTimeout(relayLifetimeTimer);
     relayLifetimeTimer = undefined;
+  };
+  const clearAbortedEndTimer = () => {
+    if (!abortedEndTimer) {
+      return;
+    }
+    clearTimeout(abortedEndTimer);
+    abortedEndTimer = undefined;
   };
 
   const flushPending = () => {
@@ -458,14 +483,64 @@ export function startAcpSpawnParentStreamRelay(params: {
       return;
     }
 
-    const phase = normalizeOptionalString((event.data as { phase?: unknown } | undefined)?.phase);
+    const lifecycleData = event.data as
+      | {
+          phase?: unknown;
+          startedAt?: unknown;
+          endedAt?: unknown;
+          aborted?: unknown;
+          error?: unknown;
+          stopReason?: unknown;
+          timeoutPhase?: unknown;
+        }
+      | undefined;
+    const phase = normalizeOptionalString(lifecycleData?.phase);
     logEvent("lifecycle", { phase: phase ?? "unknown", data: event.data });
+    if (phase === "start") {
+      clearAbortedEndTimer();
+      return;
+    }
     if (phase === "end") {
       flushPending();
-      const startedAt = asFiniteNumber(
-        (event.data as { startedAt?: unknown } | undefined)?.startedAt,
-      );
-      const endedAt = asFiniteNumber((event.data as { endedAt?: unknown } | undefined)?.endedAt);
+      const errorText = normalizeOptionalString(lifecycleData?.error);
+      if (hasHardAgentRunTimeoutAttribution(lifecycleData)) {
+        emit(
+          errorText ? `${relayLabel} run timed out: ${errorText}` : `${relayLabel} run timed out.`,
+          `${contextPrefix}:error`,
+        );
+        dispose();
+        return;
+      }
+      if (lifecycleData?.aborted === true) {
+        if (isCancelledAgentStopReason(lifecycleData.stopReason)) {
+          emit(
+            errorText ? `${relayLabel} run stopped: ${errorText}` : `${relayLabel} run stopped.`,
+            `${contextPrefix}:error`,
+          );
+          dispose();
+          return;
+        }
+        if (!abortedEndTimer) {
+          abortedEndTimer = setTimeout(() => {
+            abortedEndTimer = undefined;
+            if (disposed) {
+              return;
+            }
+            emit(
+              errorText
+                ? `${relayLabel} run timed out: ${errorText}`
+                : `${relayLabel} run timed out.`,
+              `${contextPrefix}:error`,
+            );
+            dispose();
+          }, ABORTED_END_RELAY_GRACE_MS);
+          abortedEndTimer.unref?.();
+        }
+        return;
+      }
+      clearAbortedEndTimer();
+      const startedAt = asFiniteNumber(lifecycleData?.startedAt);
+      const endedAt = asFiniteNumber(lifecycleData?.endedAt);
       const durationMs =
         startedAt != null && endedAt != null && endedAt >= startedAt
           ? endedAt - startedAt
@@ -483,10 +558,17 @@ export function startAcpSpawnParentStreamRelay(params: {
     }
 
     if (phase === "error") {
+      clearAbortedEndTimer();
       flushPending();
-      const errorText = normalizeOptionalString(
-        (event.data as { error?: unknown } | undefined)?.error,
-      );
+      const errorText = normalizeOptionalString(lifecycleData?.error);
+      if (hasHardAgentRunTimeoutAttribution(lifecycleData)) {
+        emit(
+          errorText ? `${relayLabel} run timed out: ${errorText}` : `${relayLabel} run timed out.`,
+          `${contextPrefix}:error`,
+        );
+        dispose();
+        return;
+      }
       if (errorText) {
         emit(`${relayLabel} run failed: ${errorText}`, `${contextPrefix}:error`);
       } else {
@@ -503,6 +585,7 @@ export function startAcpSpawnParentStreamRelay(params: {
     disposed = true;
     clearFlushTimer();
     clearRelayLifetimeTimer();
+    clearAbortedEndTimer();
     flushLogBuffer();
     clearInterval(noOutputWatcherTimer);
     unsubscribe();

@@ -66,6 +66,30 @@ export function resolveAnnounceRetryDelayMs(retryCount: number) {
   return Math.min(baseDelay, MAX_ANNOUNCE_RETRY_DELAY_MS);
 }
 
+export function resolveSubagentRunTimeoutAt(entry: SubagentRunRecord): number | undefined {
+  const runTimeoutSeconds = entry.runTimeoutSeconds;
+  if (
+    typeof runTimeoutSeconds !== "number" ||
+    !Number.isFinite(runTimeoutSeconds) ||
+    runTimeoutSeconds <= 0
+  ) {
+    return undefined;
+  }
+  const startedAt = entry.startedAt ?? entry.createdAt;
+  if (!Number.isFinite(startedAt)) {
+    return undefined;
+  }
+  return Math.floor(startedAt) + Math.floor(runTimeoutSeconds * 1000);
+}
+
+export function isAtOrAfterSubagentRunTimeout(
+  entry: SubagentRunRecord,
+  atMs: number = Date.now(),
+): boolean {
+  const timeoutAt = resolveSubagentRunTimeoutAt(entry);
+  return typeof timeoutAt === "number" && atMs >= timeoutAt;
+}
+
 function formatAnnounceGiveUpLogField(value: string): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   return JSON.stringify(normalized.length > 2_000 ? `${normalized.slice(0, 2_000)}…` : normalized);

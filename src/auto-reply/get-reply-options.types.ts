@@ -1,3 +1,4 @@
+import type { AgentRunTimeoutPhase } from "../agents/run-timeout-attribution.js";
 import type { ImageContent } from "../llm/types.js";
 import type { PromptImageOrderEntry } from "../media/prompt-image-order.js";
 import type { UserTurnTranscriptRecorder } from "../sessions/user-turn-transcript.js";
@@ -16,6 +17,11 @@ export type ModelSelectedContext = {
   provider: string;
   model: string;
   thinkLevel: string | undefined;
+};
+
+export type AgentRunTerminalMetadata = {
+  timeoutPhase?: AgentRunTimeoutPhase;
+  providerStarted?: boolean;
 };
 
 export type TypingPolicy =
@@ -57,6 +63,8 @@ export type GetReplyOptions = {
   imageOrder?: PromptImageOrderEntry[];
   /** Notifies when an agent run actually starts (useful for webchat command handling). */
   onAgentRunStart?: (runId: string) => void;
+  /** Carries terminal run metadata even when no visible reply payload is returned. */
+  onAgentRunTerminalMetadata?: (metadata: AgentRunTerminalMetadata) => void;
   /** Shared lifecycle owner for the current user-turn transcript append. */
   userTurnTranscriptRecorder?: UserTurnTranscriptRecorder;
   onReplyStart?: () => Promise<void> | void;

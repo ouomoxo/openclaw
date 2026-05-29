@@ -60,12 +60,12 @@ function expectForbidden(result: SpawnResult, error: string) {
   expect(result.error).toBe(error);
 }
 
-function expectAccepted(result: SpawnResult, runId: string): AcceptedSpawnResult {
+function expectAccepted(result: SpawnResult): AcceptedSpawnResult {
   expect(result.status).toBe("accepted");
   if (result.status !== "accepted") {
     throw new Error(`Expected accepted spawn result, received ${result.status}`);
   }
-  expect(result.runId).toBe(runId);
+  expect(typeof result.runId).toBe("string");
   expect(typeof result.childSessionKey).toBe("string");
   return result as AcceptedSpawnResult;
 }
@@ -117,7 +117,7 @@ describe("subagent spawn depth + child limits", () => {
 
     const result = await spawnFrom("agent:main:subagent:parent");
 
-    const accepted = expectAccepted(result, "run-1");
+    const accepted = expectAccepted(result);
     expect(accepted.childSessionKey).toMatch(/^agent:main:subagent:/);
 
     const childSession = persistedStore?.[accepted.childSessionKey];
@@ -146,7 +146,7 @@ describe("subagent spawn depth + child limits", () => {
       },
     );
 
-    const accepted = expectAccepted(result, "run-1");
+    const accepted = expectAccepted(result);
     const childSession = persistedStore?.[accepted.childSessionKey];
     if (!childSession) {
       throw new Error("Expected persisted child session");
@@ -194,7 +194,7 @@ describe("subagent spawn depth + child limits", () => {
 
     const result = await spawnFrom("agent:main:subagent:parent");
 
-    expectAccepted(result, "run-1");
+    expectAccepted(result);
   });
 
   it("fails spawn when the initial child session patch rejects the model", async () => {

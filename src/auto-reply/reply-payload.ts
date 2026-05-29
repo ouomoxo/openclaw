@@ -1,3 +1,4 @@
+import type { AgentRunTimeoutPhase } from "../agents/run-timeout-attribution.js";
 import type {
   InteractiveReply,
   MessagePresentation,
@@ -169,6 +170,9 @@ export type ReplyPayloadMetadata = {
   beforeAgentRunBlocked?: boolean;
   /** Warning synthesized from an observed tool error after the run produced assistant output. */
   nonTerminalToolErrorWarning?: boolean;
+  /** Terminal timeout attribution from the agent run that produced this payload. */
+  agentRunTimeoutPhase?: AgentRunTimeoutPhase;
+  agentRunProviderStarted?: boolean;
 };
 
 const replyPayloadMetadata = new WeakMap<object, ReplyPayloadMetadata>();

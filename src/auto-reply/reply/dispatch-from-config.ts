@@ -2350,6 +2350,7 @@ export async function dispatchReplyFromConfig(
             typingPolicy: typing.typingPolicy,
             suppressTyping: typing.suppressTyping,
             onPartialReply: wrapProgressCallback(params.replyOptions?.onPartialReply),
+            onAgentRunTerminalMetadata: params.replyOptions?.onAgentRunTerminalMetadata,
             onReasoningStream: wrapProgressCallback(params.replyOptions?.onReasoningStream),
             onReasoningEnd: wrapProgressCallback(params.replyOptions?.onReasoningEnd),
             onAssistantMessageStart: wrapProgressCallback(

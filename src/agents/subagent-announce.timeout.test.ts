@@ -311,6 +311,26 @@ describe("subagent announce timeout config", () => {
     expect(directAgentCall?.timeoutMs).toBe(120_000);
   });
 
+  it("does not wait for an active embedded child after a terminal timeout outcome", async () => {
+    sessionStore = {
+      "agent:main:subagent:worker": {
+        sessionId: "child-session-timeout",
+      },
+    };
+    isEmbeddedAgentRunActiveMock.mockReturnValue(true);
+    waitForEmbeddedAgentRunEndMock.mockResolvedValue(false);
+
+    const didAnnounce = await runAnnounceFlowForTest("run-terminal-timeout", {
+      outcome: { status: "timeout" },
+      roundOneReply: undefined,
+      waitForCompletion: false,
+    });
+
+    expect(didAnnounce).toBe(true);
+    expect(waitForEmbeddedAgentRunEndMock).not.toHaveBeenCalled();
+    expect(findFinalDirectAgentCall()).toBeTruthy();
+  });
+
   it("honors configured announce timeout for completion direct agent call", async () => {
     setConfiguredAnnounceTimeout(120_000);
     await runAnnounceFlowForTest("run-config-timeout-send", {

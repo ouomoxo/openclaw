@@ -1211,6 +1211,14 @@ async function agentCommandInternal(
     };
     const attemptLifecycleCallbacks = createAgentAttemptLifecycleCallbacks(attemptLifecycleState);
     let lifecycleFinishingEmitted = false;
+    const resolveTerminalLifecycleMeta = (runResult: AgentAttemptResult) => ({
+      ...(runResult.meta.livenessState ? { livenessState: runResult.meta.livenessState } : {}),
+      ...(runResult.meta.timeoutPhase ? { timeoutPhase: runResult.meta.timeoutPhase } : {}),
+      ...(runResult.meta.providerStarted !== undefined
+        ? { providerStarted: runResult.meta.providerStarted }
+        : {}),
+      ...(runResult.meta.replayInvalid === true ? { replayInvalid: true } : {}),
+    });
     const emitLifecycleFinishing = (runResult: AgentAttemptResult) => {
       if (
         attemptLifecycleState.lifecycleEnded ||
@@ -1230,6 +1238,7 @@ async function agentCommandInternal(
           endedAt: Date.now(),
           aborted: runResult.meta.aborted ?? false,
           stopReason: runResult.meta.stopReason,
+          ...resolveTerminalLifecycleMeta(runResult),
         },
       });
     };
@@ -1251,6 +1260,7 @@ async function agentCommandInternal(
           endedAt: Date.now(),
           aborted: runResult.meta.aborted ?? false,
           stopReason,
+          ...resolveTerminalLifecycleMeta(runResult),
         },
       });
     };

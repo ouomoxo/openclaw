@@ -181,6 +181,8 @@ function createLifecycleController({
     subagentAnnounceTimeoutMs: 1_000,
     persist: vi.fn(),
     clearPendingLifecycleError: vi.fn(),
+    clearPendingLifecycleTimeout: vi.fn(),
+    getPendingLifecycleTimeout: vi.fn(() => undefined),
     countPendingDescendantRuns: () => 0,
     suppressAnnounceForSteerRestart: () => false,
     shouldEmitEndedHookForRun: () => false,
@@ -746,6 +748,80 @@ describe("subagent registry lifecycle hardening", () => {
     expect(persist).toHaveBeenCalled();
   });
 
+  it("keeps timeout completion terminal when a late success arrives", async () => {
+    const persist = vi.fn();
+    const runSubagentAnnounceFlow = vi.fn(async () => true);
+    const entry = createRunEntry({
+      startedAt: 2_000,
+      expectsCompletionMessage: true,
+    });
+    const controller = createLifecycleController({ entry, persist, runSubagentAnnounceFlow });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_250,
+      outcome: { status: "timeout" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: true,
+    });
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 8_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: true,
+    });
+
+    expect(entry.outcome).toEqual({
+      status: "timeout",
+      startedAt: 2_000,
+      endedAt: 4_250,
+      elapsedMs: 2_250,
+    });
+    expect(entry.endedAt).toBe(4_250);
+    expect(runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows earlier terminal evidence to correct a timeout snapshot", async () => {
+    const persist = vi.fn();
+    const captureSubagentCompletionReply = vi.fn(async () => "real final report");
+    const entry = createRunEntry({
+      startedAt: 2_000,
+      outcome: {
+        status: "timeout",
+        startedAt: 2_000,
+        endedAt: 4_250,
+        elapsedMs: 2_250,
+      },
+      endedAt: 4_250,
+      expectsCompletionMessage: true,
+      completion: { resultText: null, capturedAt: 4_250 },
+    });
+    const controller = createLifecycleController({
+      entry,
+      persist,
+      captureSubagentCompletionReply,
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+    });
+
+    expect(entry.outcome).toEqual({
+      status: "ok",
+      startedAt: 2_000,
+      endedAt: 4_000,
+      elapsedMs: 2_000,
+    });
+    expect(entry.completion?.resultText).toBe("real final report");
+    expect(entry.endedAt).toBe(4_000);
+    expect(persist).toHaveBeenCalled();
+  });
+
   it("persists timing when a preexisting outcome matches without timing", async () => {
     const persist = vi.fn();
     const entry = createRunEntry({
@@ -836,6 +912,38 @@ describe("subagent registry lifecycle hardening", () => {
     expectFields(firstCallArg(taskExecutorMocks.failTaskRunByRunId), {
       status: "failed",
       error: "All models failed (2): timeout",
+      progressSummary: undefined,
+    });
+    expect(persist).toHaveBeenCalled();
+  });
+
+  it("does not wait for a completion reply when timeout outcomes settle", async () => {
+    const persist = vi.fn();
+    const captureSubagentCompletionReply = vi.fn(async () => "stale assistant text");
+    const entry = createRunEntry({
+      expectsCompletionMessage: true,
+    });
+
+    const controller = createLifecycleController({
+      entry,
+      persist,
+      captureSubagentCompletionReply,
+    });
+
+    await expect(
+      controller.completeSubagentRun({
+        runId: entry.runId,
+        endedAt: 4_000,
+        outcome: { status: "timeout" },
+        reason: SUBAGENT_ENDED_REASON_COMPLETE,
+        triggerCleanup: false,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(captureSubagentCompletionReply).not.toHaveBeenCalled();
+    expect(entry.completion?.resultText).toBeNull();
+    expectFields(firstCallArg(taskExecutorMocks.failTaskRunByRunId), {
+      status: "timed_out",
       progressSummary: undefined,
     });
     expect(persist).toHaveBeenCalled();

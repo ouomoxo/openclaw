@@ -5,6 +5,7 @@ import {
   resetExecApprovalFollowupRuntimeHandoffsForTests,
 } from "../../agents/bash-tools.exec-approval-followup-state.js";
 import { BARE_SESSION_RESET_PROMPT } from "../../auto-reply/reply/session-reset-prompt.js";
+import { CommandLaneTaskTimeoutError } from "../../process/command-queue.js";
 import {
   getDetachedTaskLifecycleRuntime,
   resetDetachedTaskLifecycleRuntimeForTests,
@@ -4613,6 +4614,58 @@ describe("gateway agent handler chat.abort integration", () => {
       stopReason: "rpc",
       timeoutPhase: "queue",
       providerStarted: false,
+    });
+  });
+
+  it("preserves timeout status when the command lane guard rejects after the run deadline", async () => {
+    prime();
+    const runId = "idem-lane-timeout";
+    mocks.agentCommand.mockRejectedValueOnce(new CommandLaneTaskTimeoutError("subagent", 38_000));
+
+    const context = makeContext();
+    const respond = vi.fn();
+    await invokeAgent(
+      {
+        message: "hi",
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        idempotencyKey: runId,
+      },
+      { context, respond, reqId: runId, flushDispatch: false },
+    );
+
+    await flushScheduledDispatchStep();
+
+    const finalResponse = respond.mock.calls.find(
+      (call: unknown[]) => (call[1] as { status?: unknown } | undefined)?.status === "timeout",
+    );
+    expectRecordFields(requireValue(finalResponse, "terminal response missing")[1], {
+      runId,
+      status: "timeout",
+      summary: 'CommandLaneTaskTimeoutError: Command lane "subagent" task timed out after 38000ms',
+    });
+    expect(mockCallArg(respond, 1, 2)).toBeUndefined();
+    expectRecordFields(context.dedupe.get(`agent:${runId}`)?.payload, {
+      runId,
+      status: "timeout",
+      summary: 'CommandLaneTaskTimeoutError: Command lane "subagent" task timed out after 38000ms',
+    });
+    expect(context.dedupe.get(`agent:${runId}`)?.ok).toBe(true);
+
+    const waitRespond = vi.fn();
+    await agentHandlers["agent.wait"]({
+      params: { runId, timeoutMs: 0 },
+      respond: waitRespond as never,
+      context,
+      req: { type: "req", id: "wait-lane-timeout", method: "agent.wait" },
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    expectRecordFields(mockCallArg(waitRespond, 0, 1), {
+      runId,
+      status: "timeout",
+      error: 'CommandLaneTaskTimeoutError: Command lane "subagent" task timed out after 38000ms',
     });
   });
 

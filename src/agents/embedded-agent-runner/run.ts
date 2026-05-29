@@ -3022,6 +3022,57 @@ export async function runEmbeddedAgent(
               acceptedSessionSpawns: attempt.acceptedSessionSpawns,
             };
           }
+          if (timedOut && attempt.timedOutDuringToolExecution === true) {
+            const replayInvalid = resolveReplayInvalidForAttempt(null);
+            const livenessState: EmbeddedRunLivenessState = "blocked";
+            const timeoutPhase = "post_turn" as const;
+            const providerStarted = true;
+            attempt.setTerminalLifecycleMeta?.({
+              replayInvalid,
+              livenessState,
+              timeoutPhase,
+              providerStarted,
+            });
+            const timeoutPayloads = hasMessagingToolDeliveryEvidence(attempt)
+              ? undefined
+              : [
+                  ...(payloadsWithToolMedia || []),
+                  {
+                    text:
+                      "Request timed out while waiting for tool execution to finish. " +
+                      "Please try again, or increase `agents.defaults.timeoutSeconds` in your config.",
+                    isError: true,
+                  },
+                ];
+            return {
+              payloads: timeoutPayloads?.length ? timeoutPayloads : undefined,
+              meta: {
+                durationMs: Date.now() - started,
+                agentMeta,
+                aborted,
+                systemPromptReport: attempt.systemPromptReport,
+                finalPromptText: attempt.finalPromptText,
+                finalAssistantVisibleText,
+                finalAssistantRawText,
+                replayInvalid,
+                livenessState,
+                timeoutPhase,
+                providerStarted,
+                toolSummary: attemptToolSummary,
+                ...(failureSignal ? { failureSignal } : {}),
+                agentHarnessResultClassification: attempt.agentHarnessResultClassification,
+              },
+              didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+              didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
+              messagingToolSentTexts: attempt.messagingToolSentTexts,
+              messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
+              messagingToolSentTargets: attempt.messagingToolSentTargets,
+              messagingToolSourceReplyPayloads: attempt.messagingToolSourceReplyPayloads,
+              heartbeatToolResponse: attempt.heartbeatToolResponse,
+              successfulCronAdds: attempt.successfulCronAdds,
+              acceptedSessionSpawns: attempt.acceptedSessionSpawns,
+            };
+          }
 
           const silentToolResultReplyPayload = resolveSilentToolResultReplyPayload({
             isCronTrigger: params.trigger === "cron",

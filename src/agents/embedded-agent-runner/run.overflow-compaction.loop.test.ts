@@ -591,6 +591,64 @@ describe("overflow compaction in run loop", () => {
     expect(result.payloads?.[0]?.text).toContain("timed out");
   });
 
+  it("does not make timeout-compaction recovery terminal when the retry succeeds", async () => {
+    mockedRunEmbeddedAttempt
+      .mockResolvedValueOnce(
+        makeAttemptResult({
+          aborted: true,
+          timedOut: true,
+          timedOutDuringCompaction: false,
+          assistantTexts: [],
+          attemptUsage: { input: 150_000, output: 0, total: 150_000 },
+        }),
+      )
+      .mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+    mockedCompactDirect.mockResolvedValueOnce(
+      makeCompactionSuccess({
+        summary: "Compacted session after timeout",
+        tokensBefore: 150_000,
+        tokensAfter: 20_000,
+      }),
+    );
+
+    const result = await runEmbeddedAgent(baseParams);
+
+    expect(mockedCompactDirect).toHaveBeenCalledTimes(1);
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(result.meta.error).toBeUndefined();
+    expect(result.meta?.timeoutPhase).toBeUndefined();
+  });
+
+  it("returns a post-turn timeout when the run times out during tool execution", async () => {
+    const setTerminalLifecycleMeta = vi.fn();
+    mockedRunEmbeddedAttempt.mockResolvedValue(
+      makeAttemptResult({
+        aborted: true,
+        timedOut: true,
+        timedOutDuringCompaction: false,
+        timedOutDuringToolExecution: true,
+        clientToolCalls: [{ name: "hosted_tool", params: { arg: "value" } }],
+        setTerminalLifecycleMeta,
+      }),
+    );
+
+    const result = await runEmbeddedAgent(baseParams);
+
+    expect(result.payloads?.at(-1)?.isError).toBe(true);
+    expect(result.payloads?.at(-1)?.text).toContain("timed out");
+    expect(result.meta?.timeoutPhase).toBe("post_turn");
+    expect(result.meta?.providerStarted).toBe(true);
+    expect(result.meta?.livenessState).toBe("blocked");
+    expect(result.meta?.stopReason).toBeUndefined();
+    expect(result.meta?.pendingToolCalls).toBeUndefined();
+    expect(setTerminalLifecycleMeta).toHaveBeenCalledWith({
+      replayInvalid: false,
+      livenessState: "blocked",
+      timeoutPhase: "post_turn",
+      providerStarted: true,
+    });
+  });
+
   it("uses harness-provided prompt timeout outcome metadata", async () => {
     const setTerminalLifecycleMeta = vi.fn();
     mockedRunEmbeddedAttempt.mockResolvedValue(

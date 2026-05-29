@@ -13,6 +13,10 @@ const hoisted = vi.hoisted(() => ({
   updateSessionStoreMock: vi.fn(),
   pruneLegacyStoreKeysMock: vi.fn(),
   registerSubagentRunMock: vi.fn(),
+  armSubagentRunTimeoutMock: vi.fn(),
+  releaseSubagentRunMock: vi.fn(),
+  discardFailedSubagentSpawnRunMock: vi.fn(),
+  listSubagentRunsForRequesterMock: vi.fn(),
   emitSessionLifecycleEventMock: vi.fn(),
   resolveAgentConfigMock: vi.fn(),
   configOverride: {} as Record<string, unknown>,
@@ -66,6 +70,10 @@ describe("spawnSubagentDirect seam flow", () => {
       updateSessionStoreMock: hoisted.updateSessionStoreMock,
       pruneLegacyStoreKeysMock: hoisted.pruneLegacyStoreKeysMock,
       registerSubagentRunMock: hoisted.registerSubagentRunMock,
+      armSubagentRunTimeoutMock: hoisted.armSubagentRunTimeoutMock,
+      releaseSubagentRunMock: hoisted.releaseSubagentRunMock,
+      discardFailedSubagentSpawnRunMock: hoisted.discardFailedSubagentSpawnRunMock,
+      listSubagentRunsForRequesterMock: hoisted.listSubagentRunsForRequesterMock,
       emitSessionLifecycleEventMock: hoisted.emitSessionLifecycleEventMock,
       resolveAgentConfig: hoisted.resolveAgentConfigMock,
       resolveSubagentSpawnModelSelection: () => "openai-codex/gpt-5.4",
@@ -81,6 +89,10 @@ describe("spawnSubagentDirect seam flow", () => {
     hoisted.updateSessionStoreMock.mockReset();
     hoisted.pruneLegacyStoreKeysMock.mockReset();
     hoisted.registerSubagentRunMock.mockReset();
+    hoisted.armSubagentRunTimeoutMock.mockReset();
+    hoisted.releaseSubagentRunMock.mockReset();
+    hoisted.discardFailedSubagentSpawnRunMock.mockReset();
+    hoisted.listSubagentRunsForRequesterMock.mockReset().mockReturnValue([]);
     hoisted.emitSessionLifecycleEventMock.mockReset();
     hoisted.resolveAgentConfigMock.mockReset();
     hoisted.resolveAgentConfigMock.mockImplementation(
@@ -178,15 +190,21 @@ describe("spawnSubagentDirect seam flow", () => {
     const operations: string[] = [];
     let persistedStore: Record<string, Record<string, unknown>> | undefined;
 
-    hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
-      operations.push(`gateway:${request.method ?? "unknown"}`);
-      if (request.method === "agent") {
-        return { runId: "run-1" };
-      }
-      if (request.method?.startsWith("sessions.")) {
-        return { ok: true };
-      }
-      return {};
+    hoisted.callGatewayMock.mockImplementation(
+      async (request: { method?: string; params?: { idempotencyKey?: string } }) => {
+        operations.push(`gateway:${request.method ?? "unknown"}`);
+        if (request.method === "agent") {
+          return { runId: request.params?.idempotencyKey ?? "run-1" };
+        }
+        if (request.method?.startsWith("sessions.")) {
+          return { ok: true };
+        }
+        return {};
+      },
+    );
+    hoisted.registerSubagentRunMock.mockImplementation((record: unknown) => {
+      operations.push("register");
+      return record;
     });
     installSessionStoreCaptureMock(hoisted.updateSessionStoreMock, {
       operations,
@@ -211,7 +229,7 @@ describe("spawnSubagentDirect seam flow", () => {
     );
 
     expect(result.status).toBe("accepted");
-    expect(result.runId).toBe("run-1");
+    expect(result.runId).toEqual(expect.any(String));
     expect(result.mode).toBe("run");
     expect(result.modelApplied).toBe(true);
     expect(result.childSessionKey).toMatch(/^agent:main:subagent:/);
@@ -221,7 +239,7 @@ describe("spawnSubagentDirect seam flow", () => {
     expect(hoisted.updateSessionStoreMock).toHaveBeenCalledTimes(3);
     const registerInput = firstRegisteredSubagentRun();
     const requesterOrigin = requireRecord(registerInput.requesterOrigin);
-    expect(registerInput.runId).toBe("run-1");
+    expect(registerInput.runId).toBe(result.runId);
     expect(registerInput.childSessionKey).toBe(childSessionKey);
     expect(registerInput.requesterSessionKey).toBe("agent:main:main");
     expect(registerInput.requesterDisplayKey).toBe("agent:main:main");
@@ -233,6 +251,7 @@ describe("spawnSubagentDirect seam flow", () => {
     expect(registerInput.cleanup).toBe("keep");
     expect(registerInput.model).toBe("openai-codex/gpt-5.4");
     expect(registerInput.workspaceDir).toBe("/tmp/requester-workspace");
+    expect(operations.indexOf("register")).toBeLessThan(operations.indexOf("gateway:agent"));
     expect(registerInput.expectsCompletionMessage).toBe(true);
     expect(registerInput.spawnMode).toBe("run");
     expect(hoisted.emitSessionLifecycleEventMock).toHaveBeenCalledWith({
@@ -257,6 +276,126 @@ describe("spawnSubagentDirect seam flow", () => {
     const agentParams = requireRecord(agentRequest.params);
     expect(agentParams.sessionKey).toBe(childSessionKey);
     expect(agentParams.cleanupBundleMcpOnRunEnd).toBe(true);
+  });
+
+  it("preserves a terminal pre-registered run when the child agent RPC fails late", async () => {
+    let registeredRunId: string | undefined;
+    hoisted.registerSubagentRunMock.mockImplementation((record: unknown) => {
+      const run = requireRecord(record);
+      registeredRunId = typeof run.runId === "string" ? run.runId : undefined;
+      hoisted.listSubagentRunsForRequesterMock.mockReturnValue([
+        {
+          ...run,
+          endedAt: Date.parse("2026-03-24T12:00:08Z"),
+          outcome: { status: "timeout" },
+        },
+      ]);
+      return record;
+    });
+    hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent") {
+        throw new Error("late child rpc failure");
+      }
+      if (request.method?.startsWith("sessions.")) {
+        return { ok: true };
+      }
+      return {};
+    });
+    installSessionStoreCaptureMock(hoisted.updateSessionStoreMock);
+
+    const result = await spawnSubagentDirect(
+      {
+        task: "preserve terminal timeout",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    expect(result.runId).toBe(registeredRunId);
+    expect(hoisted.releaseSubagentRunMock).not.toHaveBeenCalled();
+    expect(gatewayRequestRecords().some((request) => request.method === "sessions.delete")).toBe(
+      false,
+    );
+  });
+
+  it("discards a pre-registered run without release semantics when the child agent RPC fails before acceptance", async () => {
+    let registeredRunId: string | undefined;
+    hoisted.registerSubagentRunMock.mockImplementation((record: unknown) => {
+      const run = requireRecord(record);
+      registeredRunId = typeof run.runId === "string" ? run.runId : undefined;
+      hoisted.listSubagentRunsForRequesterMock.mockReturnValue([run]);
+      return record;
+    });
+    hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent") {
+        throw new Error("child rpc rejected before acceptance");
+      }
+      if (request.method?.startsWith("sessions.")) {
+        return { ok: true };
+      }
+      return {};
+    });
+    installSessionStoreCaptureMock(hoisted.updateSessionStoreMock);
+
+    const result = await spawnSubagentDirect(
+      {
+        task: "fail before acceptance",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("error");
+    expect(result.runId).toBe(registeredRunId);
+    expect(hoisted.discardFailedSubagentSpawnRunMock).toHaveBeenCalledWith(registeredRunId);
+    expect(hoisted.releaseSubagentRunMock).not.toHaveBeenCalled();
+    expect(gatewayRequestRecords().some((request) => request.method === "sessions.delete")).toBe(
+      true,
+    );
+  });
+
+  it("registers explicit run timeout before the child agent RPC returns", async () => {
+    installSessionStoreCaptureMock(hoisted.updateSessionStoreMock);
+
+    const result = await spawnSubagentDirect(
+      {
+        task: "arm timeout after accepted",
+        runTimeoutSeconds: 8,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    const registerInput = firstRegisteredSubagentRun();
+    expect(registerInput.runTimeoutSeconds).toBe(8);
+    expect(hoisted.armSubagentRunTimeoutMock).toHaveBeenCalledWith({
+      runId: result.runId,
+      runTimeoutSeconds: 8,
+      startedAt: undefined,
+    });
+  });
+
+  it("keeps the child agent RPC alive through explicit timeout reconciliation", async () => {
+    installSessionStoreCaptureMock(hoisted.updateSessionStoreMock);
+
+    const result = await spawnSubagentDirect(
+      {
+        task: "long timeout fallback ordering",
+        runTimeoutSeconds: 120,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    const agentRequest = gatewayRequest("agent");
+    expect(agentRequest.timeoutMs).toBe(140_000);
   });
 
   it("keeps controller ownership separate from completion ownership", async () => {

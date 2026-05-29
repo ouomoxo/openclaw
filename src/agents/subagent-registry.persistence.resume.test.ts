@@ -219,4 +219,258 @@ describe("subagent registry persistence resume", () => {
     expect(restored?.requesterOrigin?.channel).toBe("whatsapp");
     expect(restored?.requesterOrigin?.accountId).toBe("acct-main");
   });
+
+  it("honors restored run timeout fallback from the persisted start time", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.parse("2026-03-24T12:00:00Z");
+      vi.setSystemTime(new Date("2026-03-24T12:00:30Z"));
+      tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+      process.env.OPENCLAW_STATE_DIR = tempStateDir;
+      const registryPath = path.join(tempStateDir, "subagents", "runs.json");
+      hoisted.registryPath = registryPath;
+      await fs.mkdir(path.dirname(registryPath), { recursive: true });
+      await fs.writeFile(
+        registryPath,
+        `${JSON.stringify(
+          {
+            version: 2,
+            runs: {
+              "run-restored-timeout": {
+                runId: "run-restored-timeout",
+                childSessionKey: "agent:main:subagent:timeout",
+                requesterSessionKey: "agent:main:main",
+                requesterDisplayKey: "main",
+                task: "restored timeout task",
+                cleanup: "keep",
+                createdAt: startedAt,
+                startedAt,
+                sessionStartedAt: startedAt,
+                runTimeoutSeconds: 8,
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      await writeChildSessionEntry({
+        sessionKey: "agent:main:subagent:timeout",
+        sessionId: "sess-timeout",
+        updatedAt: startedAt,
+      });
+      vi.mocked(callGatewayModule.callGateway).mockResolvedValue({
+        status: "pending",
+      });
+
+      mod.initSubagentRegistry();
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.waitFor(() => expect(announceSpy).toHaveBeenCalled(), {
+        timeout: 1_000,
+        interval: 10,
+      });
+      const restored = mod.listSubagentRunsForRequester("agent:main:main")[0];
+      expect(restored?.endedAt).toBe(startedAt + 8_000);
+      expect(restored?.outcome?.status).toBe("timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps restored run timeout fallback after a yielded wait snapshot", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.parse("2026-03-24T12:00:00Z");
+      vi.setSystemTime(new Date(startedAt));
+      tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+      process.env.OPENCLAW_STATE_DIR = tempStateDir;
+      const registryPath = path.join(tempStateDir, "subagents", "runs.json");
+      hoisted.registryPath = registryPath;
+      await fs.mkdir(path.dirname(registryPath), { recursive: true });
+      await fs.writeFile(
+        registryPath,
+        `${JSON.stringify(
+          {
+            version: 2,
+            runs: {
+              "run-restored-yield-timeout": {
+                runId: "run-restored-yield-timeout",
+                childSessionKey: "agent:main:subagent:yield-timeout",
+                requesterSessionKey: "agent:main:main",
+                requesterDisplayKey: "main",
+                task: "restored yielded timeout task",
+                cleanup: "keep",
+                createdAt: startedAt,
+                startedAt,
+                sessionStartedAt: startedAt,
+                runTimeoutSeconds: 8,
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      await writeChildSessionEntry({
+        sessionKey: "agent:main:subagent:yield-timeout",
+        sessionId: "sess-yield-timeout",
+        updatedAt: startedAt,
+      });
+      vi.mocked(callGatewayModule.callGateway).mockResolvedValue({
+        status: "ok",
+        startedAt,
+        endedAt: startedAt + 1_000,
+        stopReason: "end_turn",
+        livenessState: "paused",
+        yielded: true,
+      });
+
+      mod.initSubagentRegistry();
+      await vi.waitFor(() => {
+        const restored = mod.listSubagentRunsForRequester("agent:main:main")[0];
+        expect(restored?.pauseReason).toBe("sessions_yield");
+        expect(restored?.outcome).toBeUndefined();
+      });
+
+      await vi.advanceTimersByTimeAsync(22_999);
+      expect(announceSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(announceSpy).toHaveBeenCalled(), {
+        timeout: 1_000,
+        interval: 10,
+      });
+      const restored = mod.listSubagentRunsForRequester("agent:main:main")[0];
+      expect(restored?.pauseReason).toBeUndefined();
+      expect(restored?.endedAt).toBe(startedAt + 8_000);
+      expect(restored?.outcome?.status).toBe("timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes run timeout fallback for already-yielded restored runs", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.parse("2026-03-24T12:00:00Z");
+      vi.setSystemTime(new Date("2026-03-24T12:00:30Z"));
+      tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+      process.env.OPENCLAW_STATE_DIR = tempStateDir;
+      const registryPath = path.join(tempStateDir, "subagents", "runs.json");
+      hoisted.registryPath = registryPath;
+      await fs.mkdir(path.dirname(registryPath), { recursive: true });
+      await fs.writeFile(
+        registryPath,
+        `${JSON.stringify(
+          {
+            version: 2,
+            runs: {
+              "run-restored-paused-timeout": {
+                runId: "run-restored-paused-timeout",
+                childSessionKey: "agent:main:subagent:paused-timeout",
+                requesterSessionKey: "agent:main:main",
+                requesterDisplayKey: "main",
+                task: "restored paused timeout task",
+                cleanup: "keep",
+                createdAt: startedAt,
+                startedAt,
+                sessionStartedAt: startedAt,
+                endedAt: startedAt + 1_000,
+                pauseReason: "sessions_yield",
+                runTimeoutSeconds: 8,
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      await writeChildSessionEntry({
+        sessionKey: "agent:main:subagent:paused-timeout",
+        sessionId: "sess-paused-timeout",
+        updatedAt: startedAt + 1_000,
+      });
+
+      mod.initSubagentRegistry();
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.waitFor(() => expect(announceSpy).toHaveBeenCalled(), {
+        timeout: 1_000,
+        interval: 10,
+      });
+      const restored = mod.listSubagentRunsForRequester("agent:main:main")[0];
+      expect(restored?.pauseReason).toBeUndefined();
+      expect(restored?.endedAt).toBe(startedAt + 8_000);
+      expect(restored?.outcome?.status).toBe("timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes replacement run timeout fallback from run start instead of session start", async () => {
+    vi.useFakeTimers();
+    try {
+      const sessionStartedAt = Date.parse("2026-03-24T12:00:00Z");
+      const runStartedAt = Date.parse("2026-03-24T12:00:25Z");
+      vi.setSystemTime(new Date("2026-03-24T12:00:30Z"));
+      tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+      process.env.OPENCLAW_STATE_DIR = tempStateDir;
+      const registryPath = path.join(tempStateDir, "subagents", "runs.json");
+      hoisted.registryPath = registryPath;
+      await fs.mkdir(path.dirname(registryPath), { recursive: true });
+      await fs.writeFile(
+        registryPath,
+        `${JSON.stringify(
+          {
+            version: 2,
+            runs: {
+              "run-restored-replacement-timeout": {
+                runId: "run-restored-replacement-timeout",
+                childSessionKey: "agent:main:subagent:timeout",
+                requesterSessionKey: "agent:main:main",
+                requesterDisplayKey: "main",
+                task: "restored replacement timeout task",
+                cleanup: "keep",
+                createdAt: runStartedAt,
+                startedAt: runStartedAt,
+                sessionStartedAt,
+                accumulatedRuntimeMs: runStartedAt - sessionStartedAt,
+                runTimeoutSeconds: 8,
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      await writeChildSessionEntry({
+        sessionKey: "agent:main:subagent:timeout",
+        sessionId: "sess-timeout",
+        updatedAt: runStartedAt,
+      });
+      vi.mocked(callGatewayModule.callGateway).mockResolvedValue({
+        status: "pending",
+      });
+
+      mod.initSubagentRegistry();
+      await vi.advanceTimersByTimeAsync(17_999);
+      expect(announceSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(announceSpy).toHaveBeenCalled(), {
+        timeout: 1_000,
+        interval: 10,
+      });
+      const restored = mod.listSubagentRunsForRequester("agent:main:main")[0];
+      expect(restored?.endedAt).toBe(runStartedAt + 8_000);
+      expect(restored?.outcome?.status).toBe("timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

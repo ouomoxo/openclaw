@@ -16,9 +16,19 @@ function readLowerString(value: unknown): string | undefined {
   return readString(value)?.toLowerCase();
 }
 
+function isHardTimeoutPhase(value: unknown): boolean {
+  const phase = readString(value);
+  return phase === "preflight" || phase === "provider" || phase === "post_turn";
+}
+
 function normalizeLifecycleEndEventType(data: JsonObject): OpenClawEventType {
   const status = readLowerString(data.status);
   const stopReason = readLowerString(data.stopReason);
+  if (isHardTimeoutPhase(data.timeoutPhase)) {
+    return stopReason === "auth-revoked" || stopReason === "user"
+      ? "run.cancelled"
+      : "run.timed_out";
+  }
   if (
     status === "aborted" ||
     status === "cancelled" ||
@@ -39,7 +49,8 @@ function normalizeLifecycleEndEventType(data: JsonObject): OpenClawEventType {
     status === "timeout" ||
     status === "timed_out" ||
     stopReason === "timeout" ||
-    stopReason === "timed_out"
+    stopReason === "timed_out" ||
+    isHardTimeoutPhase(data.timeoutPhase)
   ) {
     return "run.timed_out";
   }
@@ -71,7 +82,7 @@ function normalizeAgentEventType(payload: JsonObject): OpenClawEventType {
       return normalizeLifecycleEndEventType(data);
     }
     if (phase === "error") {
-      return "run.failed";
+      return isHardTimeoutPhase(data.timeoutPhase) ? "run.timed_out" : "run.failed";
     }
   }
   if (stream === "tool" || stream === "item" || stream === "command_output") {

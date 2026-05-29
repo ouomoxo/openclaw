@@ -114,7 +114,7 @@ describe("sessions_spawn context modes", () => {
     );
 
     const accepted = requireAcceptedResult(result);
-    expect(accepted.runId).toBe("run-1");
+    expect(typeof accepted.runId).toBe("string");
     expect(forkSessionFromParentMock).toHaveBeenCalledWith({
       parentEntry: store.main,
       agentId: "main",
@@ -172,7 +172,7 @@ describe("sessions_spawn context modes", () => {
     );
 
     const accepted = requireAcceptedResult(result);
-    expect(accepted.runId).toBe("run-1");
+    expect(typeof accepted.runId).toBe("string");
     expect(accepted.note).toContain("Parent context is too large to fork");
     expect(forkSessionFromParentMock).not.toHaveBeenCalled();
     const prepareContext = requireFirstMockArg(prepareSubagentSpawn);

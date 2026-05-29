@@ -82,6 +82,7 @@ import {
 } from "../../infra/voicewake-routing.js";
 import type { PromptImageOrderEntry } from "../../media/prompt-image-order.js";
 import type { PluginHookSessionEndReason } from "../../plugins/hook-types.js";
+import { isCommandLaneTaskTimeoutError } from "../../process/command-queue.js";
 import {
   classifySessionKeyShape,
   isAcpSessionKey,
@@ -464,7 +465,9 @@ type GatewayAgentTaskTerminalStatus = Extract<
 >;
 
 function resolveFailedTrackedAgentTaskStatus(error: unknown): GatewayAgentTaskTerminalStatus {
-  return isAbortError(error) || isTimeoutError(error) ? "timed_out" : "failed";
+  return isAbortError(error) || isTimeoutError(error) || isCommandLaneTaskTimeoutError(error)
+    ? "timed_out"
+    : "failed";
 }
 
 function tryFinalizeTrackedAgentTask(params: {
@@ -640,6 +643,14 @@ function isGatewayAgentAbortRejection(error: unknown, signal: AbortSignal): bool
   return isAbortError(error) || readErrorName(error) === "TimeoutError";
 }
 
+function isGatewayAgentTimeoutRejection(error: unknown, signal: AbortSignal): boolean {
+  return (
+    isGatewayAgentAbortRejection(error, signal) ||
+    isTimeoutError(error) ||
+    isCommandLaneTaskTimeoutError(error)
+  );
+}
+
 function resolveGatewayAgentAbortStopReason(signal: AbortSignal): "rpc" | "timeout" {
   return readErrorName(signal.reason) === "TimeoutError" ? "timeout" : "rpc";
 }
@@ -735,36 +746,37 @@ function dispatchAgentRunFromGateway(params: {
     })
     .catch((err) => {
       const aborted = isGatewayAgentAbortRejection(err, params.abortController.signal);
+      const timedOut = isGatewayAgentTimeoutRejection(err, params.abortController.signal);
       const renderedErr = formatForLog(err);
       if (shouldTrackTask) {
         tryFinalizeTrackedAgentTask({
           runId: params.runId,
-          status: aborted ? "timed_out" : resolveFailedTrackedAgentTaskStatus(err),
+          status: timedOut ? "timed_out" : resolveFailedTrackedAgentTaskStatus(err),
           error: renderedErr,
           terminalSummary: renderedErr,
         });
       }
-      const error = errorShape(ErrorCodes.UNAVAILABLE, renderedErr);
       const stopReason = resolveGatewayAgentAbortStopReason(params.abortController.signal);
       const payload = {
         runId: params.runId,
-        status: aborted ? ("timeout" as const) : ("error" as const),
+        status: timedOut ? ("timeout" as const) : ("error" as const),
         summary: aborted ? "aborted" : renderedErr,
         ...(aborted ? { stopReason, timeoutPhase: "gateway_draining" as const } : {}),
       };
+      const error = timedOut ? undefined : errorShape(ErrorCodes.UNAVAILABLE, renderedErr);
       setGatewayDedupeEntries({
         dedupe: params.context.dedupe,
         keys: params.dedupeKeys,
         entry: {
           ts: Date.now(),
-          ok: aborted,
+          ok: timedOut,
           payload,
-          ...(aborted ? {} : { error }),
+          ...(error ? { error } : {}),
         },
       });
-      params.respond(aborted, payload, aborted ? undefined : error, {
+      params.respond(timedOut, payload, error, {
         runId: params.runId,
-        ...(aborted ? {} : { error: formatForLog(err) }),
+        ...(error ? { error: formatForLog(err) } : {}),
       });
     })
     .finally(() => {
@@ -2272,6 +2284,7 @@ export const agentHandlers: GatewayRequestHandlers = {
       // When chat.send is active with the same runId, ignore cached lifecycle
       // snapshots so stale agent results do not preempt the active chat run.
       ignoreCachedSnapshot: hasActiveChatRun,
+      ignoreLifecycleEventsBeforeMs: hasActiveChatRun ? activeChatEntry.startedAtMs : undefined,
     });
     const dedupePromise = waitForTerminalGatewayDedupe({
       dedupe: context.dedupe,

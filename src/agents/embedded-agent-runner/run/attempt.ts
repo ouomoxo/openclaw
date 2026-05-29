@@ -20,6 +20,7 @@ import {
 } from "../../../context-engine/host-compat.js";
 import { resolveContextEngineOwnerPluginId } from "../../../context-engine/registry.js";
 import type { AssembleResult } from "../../../context-engine/types.js";
+import { emitAgentEvent } from "../../../infra/agent-events.js";
 import { emitTrustedDiagnosticEvent } from "../../../infra/diagnostic-events.js";
 import { resolveDiagnosticModelContentCapturePolicy } from "../../../infra/diagnostic-llm-content.js";
 import {
@@ -3089,6 +3090,40 @@ export async function runEmbeddedAttempt(
       const compactionTimeoutMs = resolveCompactionTimeoutMs(params.config);
       let abortTimer: NodeJS.Timeout | undefined;
       let compactionGraceUsed = false;
+      let postTurnTimeoutLifecycleEmitted = false;
+      // Tool execution can keep provider cleanup unwinding after the hard
+      // deadline. Publish the terminal timeout at the deadline so waiters and
+      // subagent delivery do not depend on cleanup or the command-lane guard.
+      const emitPostTurnTimeoutLifecycle = () => {
+        if (postTurnTimeoutLifecycleEmitted) {
+          return;
+        }
+        postTurnTimeoutLifecycleEmitted = true;
+        const endedAt = Date.now();
+        const data = {
+          phase: "end",
+          aborted: true,
+          endedAt,
+          livenessState: "blocked",
+          replayInvalid: false,
+          timeoutPhase: "post_turn",
+          providerStarted: true,
+          error:
+            "Request timed out while waiting for tool execution to finish. " +
+            "Please try again, or increase `agents.defaults.timeoutSeconds` in your config.",
+        };
+        emitAgentEvent({
+          runId: params.runId,
+          stream: "lifecycle",
+          data,
+          ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+        });
+        void params.onAgentEvent?.({
+          stream: "lifecycle",
+          data,
+          ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+        });
+      };
       const scheduleAbortTimer = (delayMs: number, reason: "initial" | "compaction-grace") => {
         abortTimer = setTimeout(
           () => {
@@ -3124,6 +3159,9 @@ export async function runEmbeddedAttempt(
               })
             ) {
               timedOutDuringCompaction = true;
+            }
+            if (!timedOutDuringCompaction && countActiveToolExecutions(params.runId) > 0) {
+              emitPostTurnTimeoutLifecycle();
             }
             abortRun(true);
             if (!abortWarnTimer) {

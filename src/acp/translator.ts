@@ -34,6 +34,7 @@ import type {
   ToolKind,
 } from "@agentclientprotocol/sdk";
 import type { EventFrame } from "../../packages/gateway-protocol/src/index.js";
+import { hasHardAgentRunTimeoutAttribution } from "../agents/run-timeout-attribution.js";
 import { BASE_THINKING_LEVELS } from "../auto-reply/thinking.shared.js";
 import type { GatewayClient } from "../gateway/client.js";
 import type { GatewaySessionRow, SessionsListResult } from "../gateway/session-utils.js";
@@ -237,6 +238,7 @@ type SessionSnapshot = SessionPresentation & {
 type AgentWaitResult = {
   status?: "ok" | "error" | "timeout";
   error?: string;
+  timeoutPhase?: unknown;
 };
 
 type GatewayTranscriptMessage = {
@@ -1706,6 +1708,10 @@ export class AcpGatewayAgent implements Agent {
       return false;
     }
     if (result?.status === "error") {
+      void this.finishPrompt(sessionId, currentPending, "end_turn");
+      return false;
+    }
+    if (result?.status === "timeout" && hasHardAgentRunTimeoutAttribution(result)) {
       void this.finishPrompt(sessionId, currentPending, "end_turn");
       return false;
     }

@@ -20,4 +20,16 @@ export function normalizeAgentRunTimeoutPhase(value: unknown): AgentRunTimeoutPh
     : undefined;
 }
 
+export function isHardAgentRunTimeoutPhase(
+  value: AgentRunTimeoutPhase | undefined,
+): value is "preflight" | "provider" | "post_turn" {
+  return value === "preflight" || value === "provider" || value === "post_turn";
+}
+
+export function hasHardAgentRunTimeoutAttribution(
+  data: { timeoutPhase?: unknown } | null | undefined,
+): boolean {
+  return isHardAgentRunTimeoutPhase(normalizeAgentRunTimeoutPhase(data?.timeoutPhase));
+}
+
 export { asBoolean as normalizeProviderStarted } from "../utils/boolean.js";

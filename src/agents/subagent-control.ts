@@ -154,15 +154,8 @@ function ensureControllerOwnsRun(params: {
   return "Subagents can only control runs spawned from their own session.";
 }
 
-function isFinishedForSteerControl(
-  entry: SubagentRunRecord,
-  hasPendingDescendants: boolean,
-) {
-  return (
-    Boolean(entry.endedAt) &&
-    entry.pauseReason !== "sessions_yield" &&
-    !hasPendingDescendants
-  );
+function isFinishedForSteerControl(entry: SubagentRunRecord, hasPendingDescendants: boolean) {
+  return Boolean(entry.endedAt) && entry.pauseReason !== "sessions_yield" && !hasPendingDescendants;
 }
 
 async function killSubagentRun(params: {
@@ -568,6 +561,7 @@ export async function steerControlledSubagentRun(params: {
 
   const idempotencyKey = crypto.randomUUID();
   let runId: string = idempotencyKey;
+  const runTimeoutSeconds = currentEntry.runTimeoutSeconds ?? params.entry.runTimeoutSeconds ?? 0;
   try {
     const response = await subagentControlDeps.callGateway<{ runId: string }>({
       method: "agent",
@@ -579,7 +573,7 @@ export async function steerControlledSubagentRun(params: {
         deliver: false,
         channel: INTERNAL_MESSAGE_CHANNEL,
         lane: AGENT_LANE_SUBAGENT,
-        timeout: 0,
+        timeout: runTimeoutSeconds,
       },
       timeoutMs: 10_000,
     });
@@ -602,7 +596,7 @@ export async function steerControlledSubagentRun(params: {
     previousRunId: params.entry.runId,
     nextRunId: runId,
     fallback: params.entry,
-    runTimeoutSeconds: params.entry.runTimeoutSeconds ?? 0,
+    runTimeoutSeconds,
   });
   if (!replaced) {
     clearSubagentRunSteerRestart(params.entry.runId);

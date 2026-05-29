@@ -1,5 +1,6 @@
 export type {
   BlockReplyContext,
+  AgentRunTerminalMetadata,
   GetReplyOptions,
   PartialReplyPayload,
   ReplyThreadingPolicy,

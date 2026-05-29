@@ -2,6 +2,10 @@ import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { formatBlockedLivenessError, isBlockedLivenessState } from "../shared/agent-liveness.js";
 import { asFiniteNumber } from "../shared/number-coercion.js";
 import { isAbortedAgentStopReason } from "./run-termination.js";
+import {
+  isHardAgentRunTimeoutPhase,
+  type AgentRunTimeoutPhase,
+} from "./run-timeout-attribution.js";
 import { wrapPromptDataBlock } from "./sanitize-for-prompt.js";
 import {
   captureSubagentCompletionReplyUsing,
@@ -60,6 +64,7 @@ type AgentWaitResult = {
   stopReason?: string;
   livenessState?: string;
   yielded?: boolean;
+  timeoutPhase?: AgentRunTimeoutPhase;
 };
 
 export type SubagentRunOutcome = {
@@ -274,14 +279,17 @@ export function applySubagentWaitOutcome(params: {
     next.endedAt = params.wait.endedAt;
   }
   const waitError = typeof params.wait?.error === "string" ? params.wait.error : undefined;
+  const waitBlocked = isBlockedLivenessState(params.wait?.livenessState);
+  const waitAborted = isAbortedAgentStopReason(params.wait?.stopReason);
+  const hardRunTimeout = isHardAgentRunTimeoutPhase(params.wait?.timeoutPhase);
   let outcome = next.outcome;
   // Capture/announcement callers can pass raw wait snapshots that bypass the primary normalizers.
-  if (isBlockedLivenessState(params.wait?.livenessState)) {
-    outcome = { status: "error", error: formatBlockedLivenessError(waitError) };
-  } else if (isAbortedAgentStopReason(params.wait?.stopReason)) {
-    outcome = { status: "error", error: "subagent run terminated" };
-  } else if (params.wait?.status === "timeout") {
+  if (params.wait?.status === "timeout" && (hardRunTimeout || (!waitBlocked && !waitAborted))) {
     outcome = { status: "timeout" };
+  } else if (waitBlocked) {
+    outcome = { status: "error", error: formatBlockedLivenessError(waitError) };
+  } else if (waitAborted) {
+    outcome = { status: "error", error: "subagent run terminated" };
   } else if (params.wait?.status === "error") {
     outcome = { status: "error", error: waitError };
   } else if (params.wait?.status === "ok") {

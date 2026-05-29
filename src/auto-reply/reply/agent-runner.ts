@@ -13,6 +13,10 @@ import {
 } from "../../agents/embedded-agent-runner/runs.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
+import {
+  normalizeAgentRunTimeoutPhase,
+  normalizeProviderStarted,
+} from "../../agents/run-timeout-attribution.js";
 import { deriveContextPromptTokens, hasNonzeroUsage, normalizeUsage } from "../../agents/usage.js";
 import { enqueueCommitmentExtraction } from "../../commitments/runtime.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -57,7 +61,7 @@ import {
 import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import { resolveResponseUsageMode, type VerboseLevel } from "../thinking.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
-import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import type { AgentRunTerminalMetadata, GetReplyOptions, ReplyPayload } from "../types.js";
 import {
   buildKnownAgentRunFailureReplyPayload,
   runAgentTurnWithFallback,
@@ -108,6 +112,37 @@ const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
 function markBeforeAgentRunBlockedPayloads(payloads: ReplyPayload[]): ReplyPayload[] {
   return payloads.map((payload) =>
     setReplyPayloadMetadata(payload, { beforeAgentRunBlocked: true }),
+  );
+}
+
+function readAgentRunTerminalMetadata(
+  meta: { timeoutPhase?: unknown; providerStarted?: unknown } | undefined,
+): AgentRunTerminalMetadata | undefined {
+  const timeoutPhase = normalizeAgentRunTimeoutPhase(meta?.timeoutPhase);
+  const providerStarted = normalizeProviderStarted(meta?.providerStarted);
+  if (!timeoutPhase && providerStarted === undefined) {
+    return undefined;
+  }
+  return {
+    ...(timeoutPhase ? { timeoutPhase } : {}),
+    ...(providerStarted !== undefined ? { providerStarted } : {}),
+  };
+}
+
+function markAgentRunTerminalMetadata(
+  payloads: ReplyPayload[],
+  metadata: AgentRunTerminalMetadata | undefined,
+): ReplyPayload[] {
+  if (!metadata) {
+    return payloads;
+  }
+  return payloads.map((payload) =>
+    setReplyPayloadMetadata(payload, {
+      ...(metadata.timeoutPhase ? { agentRunTimeoutPhase: metadata.timeoutPhase } : {}),
+      ...(metadata.providerStarted !== undefined
+        ? { agentRunProviderStarted: metadata.providerStarted }
+        : {}),
+    }),
   );
 }
 
@@ -1534,6 +1569,10 @@ export async function runReplyAgent(params: {
       }
     }
 
+    const runTerminalMetadata = readAgentRunTerminalMetadata(runResult.meta);
+    if (runTerminalMetadata) {
+      params.opts?.onAgentRunTerminalMetadata?.(runTerminalMetadata);
+    }
     const payloadArray = runResult.payloads ?? [];
 
     if (blockReplyPipeline) {
@@ -1772,7 +1811,10 @@ export async function runReplyAgent(params: {
       accountId: sessionCtx.AccountId,
       normalizeMediaPaths: replyMediaContext.normalizePayload,
     });
-    const { replyPayloads } = payloadResult;
+    const replyPayloads = markAgentRunTerminalMetadata(
+      payloadResult.replyPayloads,
+      runTerminalMetadata,
+    );
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
 
     const hasReplyPayloadBeyondFallbackNotice = replyPayloads.some(
