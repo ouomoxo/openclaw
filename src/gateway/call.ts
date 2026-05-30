@@ -692,6 +692,7 @@ export { resolveGatewayCredentialsWithSecretInputs };
 
 async function resolveConfiguredGatewayCredentialsForExplicitToken(
   context: ResolvedGatewayCallContext,
+  opts: CallGatewayBaseOptions,
 ): Promise<
   | {
       token?: string;
@@ -702,10 +703,30 @@ async function resolveConfiguredGatewayCredentialsForExplicitToken(
   if (!context.explicitAuth.token) {
     return undefined;
   }
+  const isBackendGatewayClient =
+    (opts.mode ?? GATEWAY_CLIENT_MODES.CLI) === GATEWAY_CLIENT_MODES.BACKEND &&
+    (opts.clientName ?? GATEWAY_CLIENT_NAMES.CLI) === GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT;
+  if (!isBackendGatewayClient) {
+    return undefined;
+  }
+  const configForProbe = (() => {
+    if (context.config.gateway) {
+      return context.config;
+    }
+    try {
+      return loadGatewayConfig();
+    } catch {
+      return undefined;
+    }
+  })();
+  if (!configForProbe) {
+    return undefined;
+  }
   try {
     return await resolveGatewayCredentialsWithEnv(
       {
         ...context,
+        config: configForProbe,
         explicitAuth: {},
         urlOverride: undefined,
         urlOverrideSource: undefined,
@@ -1060,7 +1081,7 @@ async function callGatewayWithScopes<T = Record<string, unknown>>(
   const tlsFingerprint = await resolveGatewayTlsFingerprint({ opts, context, url });
   const { token, password } = resolvedCredentials;
   const configuredCredentials = context.explicitAuth.token
-    ? await resolveConfiguredGatewayCredentialsForExplicitToken(context)
+    ? await resolveConfiguredGatewayCredentialsForExplicitToken(context, opts)
     : resolvedCredentials;
   const tokenIsSharedAuth = Boolean(token && configuredCredentials?.token === token);
   const deviceIdentity =
