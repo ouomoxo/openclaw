@@ -211,23 +211,30 @@ export function defineSingleProviderPluginEntry(options: SingleProviderPluginOpt
       if (provider) {
         const providerId = provider.id ?? options.id;
         const providerAuth = copyProviderAuthOptions(provider.auth);
+        const acceptedProviderAuth: SingleProviderPluginApiKeyAuthOptions[] = [];
+        const auth = providerAuth.flatMap((entry) => {
+          try {
+            const { wizard: _wizard, ...authParams } = entry;
+            const wizard = resolveWizardSetup({
+              providerId,
+              providerLabel: provider.label,
+              auth: entry,
+            });
+            const method = createProviderApiKeyAuthMethod({
+              ...authParams,
+              providerId,
+              expectedProviders: entry.expectedProviders ?? [providerId],
+              ...(wizard ? { wizard } : {}),
+            });
+            acceptedProviderAuth.push(entry);
+            return [method];
+          } catch {
+            return [];
+          }
+        });
         const envVars = resolveEnvVars({
           envVars: provider.envVars,
-          auth: providerAuth,
-        });
-        const auth = providerAuth.map((entry) => {
-          const { wizard: _wizard, ...authParams } = entry;
-          const wizard = resolveWizardSetup({
-            providerId,
-            providerLabel: provider.label,
-            auth: entry,
-          });
-          return createProviderApiKeyAuthMethod({
-            ...authParams,
-            providerId,
-            expectedProviders: entry.expectedProviders ?? [providerId],
-            ...(wizard ? { wizard } : {}),
-          });
+          auth: acceptedProviderAuth,
         });
         auth.push(...copyProviderAuthMethods(provider.extraAuth));
         let catalog: ProviderPluginCatalog;

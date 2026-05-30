@@ -361,6 +361,57 @@ describe("defineSingleProviderPluginEntry", () => {
     expect(provider?.auth.map((method) => method.id)).toEqual(["api-key", "mock"]);
   });
 
+  it("skips unreadable provider auth option rows while preserving healthy entries", async () => {
+    const unreadableAuth = Object.defineProperty(
+      {
+        methodId: "fuzz-api-key",
+        label: "Fuzz API key",
+        optionKey: "fuzzApiKey",
+        flagName: "--fuzz-api-key" as const,
+        envVar: "FUZZ_API_KEY",
+        promptMessage: "Enter Fuzz API key",
+      },
+      "label",
+      {
+        enumerable: true,
+        get() {
+          throw new Error("fuzzplugin provider auth label read failed");
+        },
+      },
+    );
+    const entry = defineSingleProviderPluginEntry({
+      id: "mockplugin",
+      name: "Mock Provider",
+      description: "Synthetic provider plugin",
+      provider: {
+        label: "Mock",
+        docsPath: "/providers/mockplugin",
+        auth: [
+          unreadableAuth,
+          {
+            methodId: "mock-api-key",
+            label: "Mock API key",
+            optionKey: "mockApiKey",
+            flagName: "--mock-api-key",
+            envVar: "MOCK_API_KEY",
+            promptMessage: "Enter Mock API key",
+          },
+        ],
+        catalog: {
+          buildProvider: () => ({
+            api: "openai-completions",
+            baseUrl: "https://mockplugin.test/v1",
+            models: [],
+          }),
+        },
+      },
+    });
+
+    const { provider } = await captureProviderEntry({ entry });
+    expect(provider?.envVars).toEqual(["MOCK_API_KEY"]);
+    expect(provider?.auth.map((method) => method.id)).toEqual(["mock-api-key"]);
+  });
+
   it("skips unreadable optional provider metadata during registration", async () => {
     const provider = {
       label: "Fuzz",
