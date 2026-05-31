@@ -885,6 +885,51 @@ describe("registerPolicyDoctorChecks", () => {
     );
   });
 
+  it("accepts default feed search config without an explicit Feeds plugin enabled flag", async () => {
+    const configPath = join(workspaceDir, "openclaw.jsonc");
+    await fs.writeFile(configPath, "{}", "utf-8");
+    await fs.writeFile(
+      join(workspaceDir, "policy.jsonc"),
+      JSON.stringify({
+        feeds: {
+          search: {
+            requireDefault: true,
+          },
+        },
+      }),
+      "utf-8",
+    );
+
+    const result = await runPolicyChecks(
+      ctx(configPath, {
+        ...cfgWithPolicy(),
+        plugins: {
+          entries: {
+            policy: {
+              enabled: true,
+              config: { enabled: true },
+            },
+            feeds: {
+              config: {
+                search: {
+                  default: true,
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(result.findings).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checkId: "policy/feeds-search-default-missing",
+        }),
+      ]),
+    );
+  });
+
   it("does not accept disabled feed search config as policy evidence", async () => {
     const configPath = join(workspaceDir, "openclaw.jsonc");
     await fs.writeFile(configPath, "{}", "utf-8");

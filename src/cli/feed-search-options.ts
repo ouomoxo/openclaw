@@ -38,9 +38,12 @@ export async function resolveCatalogFeedSearchOptions(opts: CatalogFeedSearchCli
 }> {
   const cliSourceIds = splitFeedSourceIds(opts.feedSource);
   if (opts.catalogFeeds === true || cliSourceIds !== undefined) {
-    return (await readFeedPluginEnabledForSearch())
-      ? { enabled: true, sourceIds: cliSourceIds }
-      : { enabled: false };
+    if (!(await readFeedPluginEnabledForSearch())) {
+      throw new Error(
+        "Catalog feed search requires the Feeds plugin to be enabled and allowed in config.",
+      );
+    }
+    return { enabled: true, sourceIds: cliSourceIds };
   }
   return readDefaultCatalogFeedSearchOptions();
 }

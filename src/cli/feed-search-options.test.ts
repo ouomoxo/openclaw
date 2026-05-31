@@ -77,7 +77,7 @@ describe("feed search CLI options", () => {
     });
   });
 
-  it("keeps explicit feed search disabled when the Feeds plugin is disabled", async () => {
+  it("fails explicit feed search when the Feeds plugin is disabled", async () => {
     mocks.readConfigFileSnapshot.mockResolvedValueOnce({
       valid: true,
       config: {
@@ -94,9 +94,17 @@ describe("feed search CLI options", () => {
       },
     });
 
-    await expect(resolveCatalogFeedSearchOptions({ catalogFeeds: true })).resolves.toEqual({
-      enabled: false,
-    });
+    await expect(resolveCatalogFeedSearchOptions({ catalogFeeds: true })).rejects.toThrow(
+      "Catalog feed search requires the Feeds plugin to be enabled and allowed in config.",
+    );
+  });
+
+  it("fails explicit feed search when feed search config cannot be read", async () => {
+    mocks.readConfigFileSnapshot.mockRejectedValueOnce(new Error("bad feeds config"));
+
+    await expect(resolveCatalogFeedSearchOptions({ catalogFeeds: true })).rejects.toThrow(
+      "Catalog feed search requires the Feeds plugin to be enabled and allowed in config.",
+    );
   });
 
   it("keeps default search disabled when the Feeds plugin is disabled", async () => {
