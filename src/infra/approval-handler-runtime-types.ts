@@ -13,7 +13,9 @@ import type { PluginApprovalRequest, PluginApprovalResolved } from "./plugin-app
 
 export type { ChannelApprovalKind } from "./approval-types.js";
 
+/** Approval request payload accepted by shared exec and plugin approval handlers. */
 export type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
+/** Approval resolution payload emitted by shared exec and plugin approval handlers. */
 export type ApprovalResolved = ExecApprovalResolved | PluginApprovalResolved;
 
 /** Shared context passed to channel approval capability hooks. */
@@ -127,6 +129,7 @@ type ChannelApprovalNativeTransportAdapterForView<
   ) => Promise<void>;
 };
 
+/** Transport hooks that prepare channel targets and mutate delivered pending entries. */
 export type ChannelApprovalNativeTransportAdapter<
   TPreparedTarget = unknown,
   TPendingEntry = unknown,
@@ -177,6 +180,7 @@ type ChannelApprovalNativeInteractionAdapterForView<
   ) => Promise<void> | void;
 };
 
+/** Optional hooks for channel-specific interactive controls attached to pending approvals. */
 export type ChannelApprovalNativeInteractionAdapter<
   TPendingEntry = unknown,
   TBinding = unknown,
@@ -221,12 +225,14 @@ type ChannelApprovalNativeObserveAdapterForView<
   ) => void;
 };
 
+/** Optional telemetry hooks for native approval delivery outcomes. */
 export type ChannelApprovalNativeObserveAdapter<
   TPreparedTarget = unknown,
   TPendingPayload = unknown,
   TPendingEntry = unknown,
 > = ChannelApprovalNativeObserveAdapterForView<TPreparedTarget, TPendingPayload, TPendingEntry>;
 
+/** Complete channel-native approval runtime consumed by the shared approval handler. */
 export type ChannelApprovalNativeRuntimeAdapter<
   TPendingPayload = unknown,
   TPreparedTarget = unknown,
@@ -248,6 +254,7 @@ export type ChannelApprovalNativeRuntimeAdapter<
   observe?: ChannelApprovalNativeObserveAdapter;
 };
 
+/** Strongly typed runtime spec used before narrowing view types to the shared adapter shape. */
 export type ChannelApprovalNativeRuntimeSpec<
   TPendingPayload,
   TPreparedTarget,

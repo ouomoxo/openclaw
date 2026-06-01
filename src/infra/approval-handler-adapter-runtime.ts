@@ -5,6 +5,7 @@ import type {
 } from "./approval-handler-runtime-types.js";
 import type { ExecApprovalChannelRuntimeEventKind } from "./exec-approval-channel-runtime.types.js";
 
+/** Runtime context capability key used to publish channel-native approval clients. */
 export const CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY = "approval.native";
 
 /**
