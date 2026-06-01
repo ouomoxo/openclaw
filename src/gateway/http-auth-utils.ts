@@ -84,6 +84,8 @@ function shouldTrustDeclaredHttpOperatorScopes(
   if (authOrRequest && "trustDeclaredOperatorScopes" in authOrRequest) {
     return authOrRequest.trustDeclaredOperatorScopes;
   }
+  // Callers that pass only auth config get the conservative legacy check:
+  // bearer shared-secret requests cannot self-declare narrower operator scopes.
   return !isGatewayBearerHttpRequest(req, authOrRequest);
 }
 
@@ -174,6 +176,8 @@ export async function authorizeScopedGatewayHttpRequestOrReply(params: {
     return null;
   }
 
+  // Scope resolution happens after auth so resolvers can distinguish trusted
+  // proxy/local requests from shared-secret bearer requests.
   const operatorScopes = params.resolveOperatorScopes(params.req, requestAuth);
   const scopeAuth = authorizeOperatorScopesForMethod(params.operatorMethod, operatorScopes);
   if (!scopeAuth.allowed) {
