@@ -61,6 +61,8 @@ export function resolveConfiguredBindingRecordBySessionKeyFromRegistry(params: {
           exactMatch = materializedTarget;
           break;
         }
+        // Keep scanning for an exact/default account rule before accepting a
+        // wildcard account match for the same parsed session key.
         wildcardMatch = materializedTarget;
       }
     }

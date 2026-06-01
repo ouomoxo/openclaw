@@ -127,11 +127,15 @@ function compileConfiguredBindingRegistry(params: {
   for (const binding of listConfiguredBindings(params.cfg)) {
     const bindingConversationId = resolveBindingConversationId(binding);
     if (!bindingConversationId) {
+      // A configured binding without a peer id cannot be matched to inbound
+      // conversations, so keep it out of the route-time registry.
       continue;
     }
 
     const resolvedChannel = resolveConfiguredBindingAdapter(binding.match.channel);
     if (!resolvedChannel) {
+      // Unknown channels or channels without binding adapters are ignored here;
+      // doctor/config validation owns user-facing warnings for bad config.
       continue;
     }
 
@@ -141,6 +145,8 @@ function compileConfiguredBindingRegistry(params: {
       conversationId: bindingConversationId,
     });
     if (!target) {
+      // Providers may reject conversation ids that are valid config strings but
+      // not valid native conversation targets for that channel.
       continue;
     }
 
@@ -153,6 +159,8 @@ function compileConfiguredBindingRegistry(params: {
       provider: resolvedChannel.provider,
     });
     if (!rule) {
+      // Consumers own binding-type support. Unsupported types should not create
+      // partial registry entries that could win matching later.
       continue;
     }
     pushCompiledRule(rulesByChannel, rule);
