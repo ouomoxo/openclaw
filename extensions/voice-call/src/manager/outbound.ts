@@ -94,6 +94,8 @@ function lookupConnectedCall(ctx: ConnectedCallContext, callId: CallId): Connect
   if (TerminalStates.has(call.state)) {
     return { kind: "ended", call };
   }
+  // The ok branch carries providerCallId/provider together so callers cannot
+  // accidentally hang up or play audio with a half-connected local record.
   return { kind: "ok", call, providerCallId: call.providerCallId, provider: ctx.provider };
 }
 
@@ -309,6 +311,8 @@ function shouldStartListeningAfterInitialMessage(ctx: ConversationContext): bool
   const streamAwareProvider = ctx.provider as typeof ctx.provider & {
     isConversationStreamConnectEnabled?: () => boolean;
   };
+  // Twilio's stream-connect mode begins listening from the webhook path; issuing
+  // a second startListening call here would duplicate media stream setup.
   return streamAwareProvider.isConversationStreamConnectEnabled?.() !== true;
 }
 
@@ -484,6 +488,8 @@ export async function continueCall(
     return { success: false, error: formatErrorMessage(err) };
   } finally {
     ctx.activeTurnCalls.delete(callId);
+    // Always remove the waiter after a turn so a late provider callback cannot
+    // resolve a promise belonging to the next user prompt.
     clearTranscriptWaiter(ctx, callId);
   }
 }
