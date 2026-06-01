@@ -7,11 +7,13 @@ import type {
 } from "./binding-types.js";
 import type { ChannelConfiguredBindingConversationRef } from "./types.adapters.js";
 
+/** Parsed routing fields extracted from a configured binding session key. */
 export type ParsedConfiguredBindingSessionKey = {
   channel: string;
   accountId: string;
 };
 
+/** Consumer contract for binding config types that materialize stateful targets. */
 export type ConfiguredBindingConsumer = {
   id: string;
   supports: (binding: ConfiguredBindingRuleConfig) => boolean;
@@ -34,10 +36,12 @@ export type ConfiguredBindingConsumer = {
 
 const registeredConfiguredBindingConsumers = new Map<string, ConfiguredBindingConsumer>();
 
+/** Lists registered configured-binding consumers in registration order. */
 export function listConfiguredBindingConsumers(): ConfiguredBindingConsumer[] {
   return [...registeredConfiguredBindingConsumers.values()];
 }
 
+/** Resolves the first registered consumer that supports a raw binding config. */
 export function resolveConfiguredBindingConsumer(
   binding: ConfiguredBindingRuleConfig,
 ): ConfiguredBindingConsumer | null {
@@ -49,6 +53,7 @@ export function resolveConfiguredBindingConsumer(
   return null;
 }
 
+/** Registers a configured-binding consumer once by trimmed id. */
 export function registerConfiguredBindingConsumer(consumer: ConfiguredBindingConsumer): void {
   const id = consumer.id.trim();
   if (!id) {
