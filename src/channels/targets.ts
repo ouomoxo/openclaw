@@ -3,8 +3,10 @@ import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/st
 export type { DirectoryConfigParams } from "./plugins/directory-types.js";
 export type { ChannelDirectoryEntry } from "./plugins/types.public.js";
 
+/** Coarse explicit target class understood by shared channel target parsers. */
 export type MessagingTargetKind = "user" | "channel";
 
+/** Parsed target that retains raw input and normalized comparison material. */
 export type MessagingTarget = {
   kind: MessagingTargetKind;
   id: string;
@@ -12,6 +14,7 @@ export type MessagingTarget = {
   normalized: string;
 };
 
+/** Parser options for helpers that accept ambiguous user/channel target input. */
 export type MessagingTargetParseOptions = {
   defaultKind?: MessagingTargetKind;
   ambiguousMessage?: string;
@@ -118,6 +121,7 @@ export function parseMentionPrefixOrAtUserTarget(params: {
   atUserPattern: RegExp;
   atUserErrorMessage: string;
 }): MessagingTarget | undefined {
+  // Mention syntax wins over generic prefixes; legacy @user is the broadest fallback.
   const mentionTarget = parseTargetMention({
     raw: params.raw,
     mentionPattern: params.mentionPattern,
