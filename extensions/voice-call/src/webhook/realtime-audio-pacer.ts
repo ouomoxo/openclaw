@@ -51,7 +51,9 @@ export class RealtimeAudioPacer {
       maxQueuedAudioBytes?: number;
       /** Called once the pacer closes because outbound audio outran the provider socket. */
       onBackpressure?: () => void;
+      /** Sends serialized frames to the provider socket; returning false drops remaining playback. */
       send: RealtimeAudioSend;
+      /** Provider-specific media/clear/mark serializer, usually bound to the stream id. */
       serializer: RealtimeAudioSerializer;
     },
   ) {}
@@ -183,8 +185,11 @@ export class RealtimeMulawSpeechStartDetector {
 
   constructor(
     private readonly params: {
+      /** Consecutive loud chunks required before reporting the speech-start edge. */
       requiredLoudChunks?: number;
+      /** Consecutive quiet chunks required before arming the next speech-start edge. */
       requiredQuietChunks?: number;
+      /** Normalized mu-law RMS threshold that separates silence/noise from speech. */
       rmsThreshold?: number;
     } = {},
   ) {}
