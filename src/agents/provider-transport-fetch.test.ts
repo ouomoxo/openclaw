@@ -300,7 +300,12 @@ describe("buildGuardedModelFetch", () => {
     );
 
     expect(response.headers.get("content-type")).toContain("text/event-stream");
-    await expect(response.text()).resolves.toContain("response.created");
+    const items = [];
+    for await (const item of Stream.fromSSEResponse(response, new AbortController())) {
+      items.push(item);
+    }
+
+    expect(items).toEqual([{ ok: true }]);
     expect(release).toHaveBeenCalledTimes(1);
   });
 
