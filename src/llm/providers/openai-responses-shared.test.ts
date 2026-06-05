@@ -2,7 +2,10 @@
 import type { Tool as OpenAIResponsesTool } from "openai/resources/responses/responses.js";
 import { describe, expect, it } from "vitest";
 import type { Context, Model, Tool } from "../types.js";
-import { convertResponsesMessages } from "./openai-responses-shared.js";
+import {
+  convertResponsesMessages,
+  createResponsesAssistantOutput,
+} from "./openai-responses-shared.js";
 import { convertResponsesTools } from "./openai-responses-tools.js";
 
 type ResponsesFunctionTool = Extract<OpenAIResponsesTool, { type: "function" }>;
@@ -381,5 +384,154 @@ describe("convertResponsesMessages", () => {
       call_id: "call_abc",
     });
     expect(functionCall).not.toHaveProperty("id");
+  });
+
+  it("ignores unreadable model metadata while converting Responses messages", () => {
+    const model = Object.defineProperties(
+      { ...nativeOpenAIModel },
+      {
+        id: {
+          get() {
+            throw new Error("id getter should be caught");
+          },
+        },
+        provider: {
+          get() {
+            throw new Error("provider getter should be caught");
+          },
+        },
+        api: {
+          get() {
+            throw new Error("api getter should be caught");
+          },
+        },
+        input: {
+          get() {
+            throw new Error("input getter should be caught");
+          },
+        },
+        reasoning: {
+          get() {
+            throw new Error("reasoning getter should be caught");
+          },
+        },
+      },
+    ) as Model<"openai-responses">;
+
+    const input = convertResponsesMessages(
+      model,
+      {
+        systemPrompt: "system",
+        messages: [
+          {
+            role: "assistant",
+            api: "openai-responses",
+            provider: "openai",
+            model: "gpt-5.5",
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "toolUse",
+            timestamp: 1,
+            content: [
+              { type: "thinking", thinking: "private thought", thinkingSignature: "opaque" },
+              { type: "toolCall", id: "call:1|fc:item", name: "lookup", arguments: {} },
+            ],
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call:1|fc:item",
+            toolName: "lookup",
+            content: [
+              { type: "text", text: "ok" },
+              { type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
+            ],
+            isError: false,
+            timestamp: 2,
+          },
+        ],
+      } satisfies Context,
+      allowedToolCallProviders,
+    ) as unknown as Array<Record<string, unknown>>;
+
+    expect(input[0]).toEqual({ role: "system", content: "system" });
+    expect(JSON.stringify(input)).not.toContain("private thought");
+    expect(input.find((item) => item.type === "message")).toBeUndefined();
+    expect(input.find((item) => item.type === "function_call")).toMatchObject({
+      type: "function_call",
+      call_id: "call_1_fc_item",
+      name: "lookup",
+      arguments: "{}",
+    });
+    expect(input.find((item) => item.type === "function_call_output")).toEqual({
+      type: "function_call_output",
+      call_id: "call_1_fc_item",
+      output: "ok\n(tool image omitted: model does not support images)",
+    });
+  });
+});
+
+describe("createResponsesAssistantOutput", () => {
+  it("uses explicit api and ignores unreadable optional model metadata", () => {
+    const model = Object.defineProperties(
+      { ...nativeOpenAIModel },
+      {
+        api: {
+          get() {
+            throw new Error("api getter should be caught");
+          },
+        },
+        provider: {
+          get() {
+            throw new Error("provider getter should be caught");
+          },
+        },
+        id: {
+          get() {
+            throw new Error("id getter should be caught");
+          },
+        },
+      },
+    ) as Model<"openai-responses">;
+
+    expect(createResponsesAssistantOutput(model, "openai-responses")).toMatchObject({
+      api: "openai-responses",
+      provider: "",
+      model: "",
+    });
+  });
+
+  it("preserves readable accessor-backed model metadata", () => {
+    const model = Object.defineProperties(
+      { ...nativeOpenAIModel },
+      {
+        api: {
+          get() {
+            return "openai-responses";
+          },
+        },
+        provider: {
+          get() {
+            return "openai";
+          },
+        },
+        id: {
+          get() {
+            return "gpt-5.5";
+          },
+        },
+      },
+    ) as Model<"openai-responses">;
+
+    expect(createResponsesAssistantOutput(model)).toMatchObject({
+      api: "openai-responses",
+      provider: "openai",
+      model: "gpt-5.5",
+    });
   });
 });

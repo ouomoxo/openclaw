@@ -548,22 +548,22 @@ describe("google-shared convertMessages", () => {
       {
         id: {
           get() {
-            throw new Error("id getter should not be invoked");
+            throw new Error("id getter should be caught");
           },
         },
         provider: {
           get() {
-            throw new Error("provider getter should not be invoked");
+            throw new Error("provider getter should be caught");
           },
         },
         api: {
           get() {
-            throw new Error("api getter should not be invoked");
+            throw new Error("api getter should be caught");
           },
         },
         input: {
           get() {
-            throw new Error("input getter should not be invoked");
+            throw new Error("input getter should be caught");
           },
         },
       },
@@ -591,8 +591,7 @@ describe("google-shared convertMessages", () => {
     const contents = convertMessagesForTest(model, context);
 
     const assistantParts = contents[0]?.parts ?? [];
-    expect(assistantParts[0]).toEqual({ text: "private thought" });
-    expect(assistantParts[1]).toEqual({ functionCall: { name: "lookup", args: {} } });
+    expect(assistantParts).toEqual([{ functionCall: { name: "lookup", args: {} } }]);
     const functionResponse = asRecord(asRecord(contents[1]?.parts?.[0]).functionResponse);
     expect(functionResponse).toEqual({
       name: "lookup",

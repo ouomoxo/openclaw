@@ -43,7 +43,11 @@ function readModelField<TApi extends Api>(model: Model<TApi>, key: string): unkn
   } catch {
     return undefined;
   }
-  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  try {
+    return descriptor && "value" in descriptor ? descriptor.value : descriptor?.get?.call(model);
+  } catch {
+    return undefined;
+  }
 }
 
 function readModelStringField<TApi extends Api>(model: Model<TApi>, key: string): string {
@@ -99,6 +103,7 @@ export function transformMessages<TApi extends Api>(
   const modelProvider = readModelStringField(model, "provider");
   const modelApi = readModelStringField(model, "api");
   const modelId = readModelStringField(model, "id");
+  const hasReadableModelIdentity = modelProvider !== "" && modelApi !== "" && modelId !== "";
 
   // First pass: transform messages (unsupported image downgrade, thinking blocks, tool call ID normalization)
   const transformed = imageAwareMessages.map((msg) => {
@@ -142,6 +147,9 @@ export function transformMessages<TApi extends Api>(
           }
           if (isSameModel) {
             return block;
+          }
+          if (!hasReadableModelIdentity) {
+            return [];
           }
           return {
             type: "text" as const,

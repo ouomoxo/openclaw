@@ -162,6 +162,34 @@ type ResponsesCommonParamsOptions = Pick<StreamOptions, "maxTokens" | "temperatu
   reasoningSummary?: ResponsesReasoningSummary;
 };
 
+function readModelField<TApi extends Api>(model: Model<TApi>, key: string): unknown {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(model, key);
+  } catch {
+    return undefined;
+  }
+  try {
+    return descriptor && "value" in descriptor ? descriptor.value : descriptor?.get?.call(model);
+  } catch {
+    return undefined;
+  }
+}
+
+function readModelStringField<TApi extends Api>(model: Model<TApi>, key: string): string {
+  const value = readModelField(model, key);
+  return typeof value === "string" ? value : "";
+}
+
+function readModelStringArrayField<TApi extends Api>(model: Model<TApi>, key: string): string[] {
+  const value = readModelField(model, key);
+  return Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : [];
+}
+
+function readModelBooleanField<TApi extends Api>(model: Model<TApi>, key: string): boolean {
+  return readModelField(model, key) === true;
+}
+
 // =============================================================================
 // Message conversion
 // =============================================================================
@@ -174,6 +202,11 @@ export function convertResponsesMessages<TApi extends Api>(
 ): ResponseInput {
   const messages: ResponseInput = [];
   const shouldReplayResponsesItemIds = options?.replayResponsesItemIds ?? true;
+  const modelProvider = readModelStringField(model, "provider");
+  const modelApi = readModelStringField(model, "api");
+  const modelId = readModelStringField(model, "id");
+  const modelInput = readModelStringArrayField(model, "input");
+  const modelReasoning = readModelBooleanField(model, "reasoning");
 
   const normalizeIdPart = (part: string): string => {
     const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -192,7 +225,7 @@ export function convertResponsesMessages<TApi extends Api>(
     source: AssistantMessage,
   ): string => {
     void targetModel;
-    if (!allowedToolCallProviders.has(model.provider)) {
+    if (!allowedToolCallProviders.has(modelProvider)) {
       return normalizeIdPart(id);
     }
     if (!id.includes("|")) {
@@ -200,7 +233,7 @@ export function convertResponsesMessages<TApi extends Api>(
     }
     const [callId, itemId] = id.split("|");
     const normalizedCallId = normalizeIdPart(callId);
-    const isForeignToolCall = source.provider !== model.provider || source.api !== model.api;
+    const isForeignToolCall = source.provider !== modelProvider || source.api !== modelApi;
     let normalizedItemId = isForeignToolCall
       ? buildForeignResponsesItemId(itemId)
       : normalizeIdPart(itemId);
@@ -215,7 +248,7 @@ export function convertResponsesMessages<TApi extends Api>(
 
   const includeSystemPrompt = options?.includeSystemPrompt ?? true;
   if (includeSystemPrompt && context.systemPrompt) {
-    const role = model.reasoning ? "developer" : "system";
+    const role = modelReasoning ? "developer" : "system";
     messages.push({
       role,
       content: sanitizeSurrogates(context.systemPrompt),
@@ -258,9 +291,9 @@ export function convertResponsesMessages<TApi extends Api>(
       const assistantMsg = msg;
       let previousReplayItemWasReasoning = false;
       const isDifferentModel =
-        assistantMsg.model !== model.id &&
-        assistantMsg.provider === model.provider &&
-        assistantMsg.api === model.api;
+        assistantMsg.model !== modelId &&
+        assistantMsg.provider === modelProvider &&
+        assistantMsg.api === modelApi;
 
       for (const block of msg.content) {
         if (block.type === "thinking") {
@@ -337,7 +370,7 @@ export function convertResponsesMessages<TApi extends Api>(
       const [callId] = msg.toolCallId.split("|");
 
       let output: string | ResponseFunctionCallOutputItemList;
-      if (hasImages && model.input.includes("image")) {
+      if (hasImages && modelInput.includes("image")) {
         const contentParts: ResponseFunctionCallOutputItemList = [];
 
         if (hasText) {
@@ -380,14 +413,14 @@ export function convertResponsesMessages<TApi extends Api>(
 
 export function createResponsesAssistantOutput<TApi extends Api>(
   model: Model<TApi>,
-  api: Api = model.api,
+  api?: Api,
 ): AssistantMessage {
   return {
     role: "assistant",
     content: [],
-    api,
-    provider: model.provider,
-    model: model.id,
+    api: api ?? (readModelStringField(model, "api") as Api),
+    provider: readModelStringField(model, "provider"),
+    model: readModelStringField(model, "id"),
     usage: {
       input: 0,
       output: 0,
