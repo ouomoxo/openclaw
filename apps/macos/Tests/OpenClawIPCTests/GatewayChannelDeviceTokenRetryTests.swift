@@ -100,6 +100,7 @@ struct GatewayChannelDeviceTokenRetryTests {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try Self.seedDeviceIdentity(in: tempDir)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         try await TestIsolation.withEnvValues(["OPENCLAW_STATE_DIR": tempDir.path]) {
@@ -164,5 +165,22 @@ struct GatewayChannelDeviceTokenRetryTests {
                     userInfo: [NSLocalizedDescriptionKey: "test gateway connect timed out"])
             },
             operation: { try await channel.connect() })
+    }
+
+    private static func seedDeviceIdentity(in stateDir: URL) throws {
+        let identityDir = stateDir.appendingPathComponent("identity", isDirectory: true)
+        try FileManager.default.createDirectory(at: identityDir, withIntermediateDirectories: true)
+        let identity = """
+            {
+              "deviceId": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+              "publicKey": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+              "privateKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+              "createdAtMs": 1700000000000
+            }
+            """
+        try identity.write(
+            to: identityDir.appendingPathComponent("device.json", isDirectory: false),
+            atomically: true,
+            encoding: .utf8)
     }
 }
