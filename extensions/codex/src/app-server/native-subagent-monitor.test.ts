@@ -28,8 +28,11 @@ function createClient(options: { serverVersion?: string } = {}) {
     if (method === "thread/turns/list") {
       const childThreadId = ((params as ThreadTurnsParams | undefined) ?? {}).threadId ?? "";
       const response = threadTurns.get(childThreadId);
-      if (response instanceof Error || !response) {
-        throw response ?? new Error(`thread turns not loaded: ${childThreadId}`);
+      if (response instanceof Error) {
+        throw response;
+      }
+      if (response === undefined) {
+        throw new Error(`thread turns not loaded: ${childThreadId}`);
       }
       return response;
     }
@@ -39,8 +42,11 @@ function createClient(options: { serverVersion?: string } = {}) {
     const readParams = (params as ThreadReadParams | undefined) ?? {};
     const childThreadId = readParams.threadId ?? "";
     const response = threadReads.get(childThreadId);
-    if (response instanceof Error || !response) {
-      throw response ?? new Error(`thread not loaded: ${childThreadId}`);
+    if (response instanceof Error) {
+      throw response;
+    }
+    if (response === undefined) {
+      throw new Error(`thread not loaded: ${childThreadId}`);
     }
     return typeof response === "function" ? await response(readParams) : response;
   });
