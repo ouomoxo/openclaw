@@ -18,8 +18,8 @@ export type CodexMediaUnderstandingProviderOptions = {
 export function buildCodexMediaUnderstandingProvider(
   options: CodexMediaUnderstandingProviderOptions = {},
 ): MediaUnderstandingProvider {
-  let runtime: Promise<typeof import("./media-understanding-provider.runtime.js")> | undefined;
-  const load = () => (runtime ??= import("./media-understanding-provider.runtime.js"));
+  let runtime: Promise<typeof import("./src/media-understanding-provider.runtime.js")> | undefined;
+  const load = () => (runtime ??= import("./src/media-understanding-provider.runtime.js"));
   return {
     id: CODEX_PROVIDER_ID,
     capabilities: ["image"],

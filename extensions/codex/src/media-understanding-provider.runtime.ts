@@ -13,36 +13,36 @@ import type {
   StructuredExtractionResult,
 } from "openclaw/plugin-sdk/media-understanding";
 import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
-import type { CodexMediaUnderstandingProviderOptions } from "./media-understanding-provider.js";
+import type { CodexMediaUnderstandingProviderOptions } from "../media-understanding-provider.js";
 import {
   CODEX_APP_SERVER_INTERRUPT_TIMEOUT_MS,
   CODEX_APP_SERVER_UNSUBSCRIBE_TIMEOUT_MS,
   runCodexTurnStartWithLease,
   settleCodexAppServerClientLease,
   validateCodexThreadCreationResponse,
-} from "./src/app-server/attempt-client-cleanup.js";
-import { resolveCodexAppServerAuthProfileIdForAgent } from "./src/app-server/auth-bridge.js";
-import type { CodexAppServerClient } from "./src/app-server/client.js";
-import { resolveCodexAppServerRuntimeOptions } from "./src/app-server/config.js";
-import { listAllCodexAppServerModelsWithClient } from "./src/app-server/models.js";
+} from "./app-server/attempt-client-cleanup.js";
+import { resolveCodexAppServerAuthProfileIdForAgent } from "./app-server/auth-bridge.js";
+import type { CodexAppServerClient } from "./app-server/client.js";
+import { resolveCodexAppServerRuntimeOptions } from "./app-server/config.js";
+import { listAllCodexAppServerModelsWithClient } from "./app-server/models.js";
 import {
   assertCodexThreadStartResponse,
   assertCodexTurnStartResponse,
-} from "./src/app-server/protocol-validators.js";
+} from "./app-server/protocol-validators.js";
 import {
   type CodexThreadStartParams,
   type CodexTurnStartParams,
   type CodexUserInput,
   type JsonValue,
-} from "./src/app-server/protocol.js";
-import { buildCodexRuntimeThreadConfig } from "./src/app-server/runtime-thread-config.js";
+} from "./app-server/protocol.js";
+import { buildCodexRuntimeThreadConfig } from "./app-server/runtime-thread-config.js";
 import {
   createIsolatedCodexAppServerClient,
   type CodexAppServerClientLease,
   type CodexAppServerClientOptions,
-} from "./src/app-server/shared-client.js";
-import { getCodexAppServerTurnRouter } from "./src/app-server/turn-router.js";
-import { createCodexTerminalTextCollector } from "./src/conversation-turn-collector.js";
+} from "./app-server/shared-client.js";
+import { getCodexAppServerTurnRouter } from "./app-server/turn-router.js";
+import { createCodexTerminalTextCollector } from "./conversation-turn-collector.js";
 
 const DEFAULT_CODEX_IMAGE_PROMPT = "Describe the image.";
 const CODEX_MEDIA_HOME_DIRNAME = "codex-media-home";
