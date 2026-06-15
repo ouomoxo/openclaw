@@ -5311,19 +5311,23 @@ describe("dispatchReplyFromConfig", () => {
 
     const hookContext = deriveInboundMessageHookContext(ctx);
     const event = toPluginMessageReceivedEvent(hookContext);
+    const metadata = event.metadata;
+    if (!metadata) {
+      throw new Error("expected message_received metadata");
+    }
 
     expect(event.from).toBe(ctx.From);
     expect(event.content).toBe("/search hello");
     expect(event.timestamp).toBe(1710000000000);
-    expect(event.metadata.originatingChannel).toBe("Telegram");
-    expect(event.metadata.originatingTo).toBe("telegram:999");
-    expect(event.metadata.messageId).toBe("sid-full");
-    expect(event.metadata.senderId).toBe("user-1");
-    expect(event.metadata.senderName).toBe("Alice");
-    expect(event.metadata.senderUsername).toBe("alice");
-    expect(event.metadata.senderE164).toBe("+15555550123");
-    expect(event.metadata.guildId).toBe("guild-123");
-    expect(event.metadata.channelName).toBe("alerts");
+    expect(metadata.originatingChannel).toBe("Telegram");
+    expect(metadata.originatingTo).toBe("telegram:999");
+    expect(metadata.messageId).toBe("sid-full");
+    expect(metadata.senderId).toBe("user-1");
+    expect(metadata.senderName).toBe("Alice");
+    expect(metadata.senderUsername).toBe("alice");
+    expect(metadata.senderE164).toBe("+15555550123");
+    expect(metadata.guildId).toBe("guild-123");
+    expect(metadata.channelName).toBe("alerts");
     expect(hookContext.channelId).toBe("telegram");
     expect(hookContext.accountId).toBe("acc-1");
     expect(hookContext.conversationId).toBe("telegram:999");
