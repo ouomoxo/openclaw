@@ -302,7 +302,7 @@ function classifySessionTranscriptFromSessionStore(absPath: string): {
 
 // Result of scanning an agent's sessions directory. `ok` distinguishes an
 // authoritative enumeration (the directory was read, or it does not exist —
-// it is only created when the first transcript is written) from a failed scan
+// agent/session dirs are only created when state is written) from a failed scan
 // (e.g. a transient NFS EIO/ESTALE or a permission error). Callers that prune
 // indexed state from this listing must only treat `ok: true` as authoritative:
 // a failed scan surfaces an empty `files` array but must not be read as "no
@@ -320,17 +320,10 @@ export async function scanSessionFilesForAgent(agentId: string): Promise<Session
       .map((name) => path.join(dir, name));
     return { ok: true, files };
   } catch (err) {
-    // A missing sessions dir is authoritative only when its parent agent dir
-    // exists: the dir appears on first transcript write, so ENOENT then means
-    // "no sessions" (fresh agent, or removed wholesale). A missing parent
-    // means the whole state tree is unreachable (e.g. unmounted volume), so
-    // treat the scan as failed rather than prune against it.
+    // A missing sessions path is authoritative: fresh agents have no agent or
+    // sessions dir until state is first written, so ENOENT means no transcripts.
     if (isFileMissingError(err)) {
-      const parentExists = await fs
-        .lstat(path.dirname(dir))
-        .then(() => true)
-        .catch(() => false);
-      return { ok: parentExists, files: [] };
+      return { ok: true, files: [] };
     }
     // Anything else (transient NFS error, permission) is non-authoritative
     // for destructive callers; surface empty but flag not-ok.

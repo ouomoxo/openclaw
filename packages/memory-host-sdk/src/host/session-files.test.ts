@@ -137,12 +137,12 @@ describe("scanSessionFilesForAgent", () => {
     expect(scan).toEqual({ ok: true, files: [] });
   });
 
-  it("reports not-ok when the whole agent state tree is unreachable", async () => {
+  it("treats an absent agent/session tree as authoritatively empty", async () => {
     const scan = await scanSessionFilesForAgent("main");
 
-    // Missing parent agent dir means the state tree itself is gone (e.g. an
-    // unmounted volume), not "no sessions"; pruning here would wipe the index.
-    expect(scan).toEqual({ ok: false, files: [] });
+    // Fresh agents have no agent/session dirs until state is first written, so
+    // a missing tree is still an authoritative empty session listing.
+    expect(scan).toEqual({ ok: true, files: [] });
   });
 
   it("keeps listSessionFilesForAgent returning the files array on failure", async () => {
