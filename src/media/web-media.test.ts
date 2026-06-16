@@ -144,6 +144,10 @@ describe("loadWebMedia", () => {
     return buffer;
   }
 
+  function createTinyWebp(): Buffer {
+    return Buffer.from("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA", "base64");
+  }
+
   function readJpegDimensions(buffer: Buffer): { width: number; height: number } {
     let offset = 2;
     while (offset + 9 < buffer.length) {
@@ -457,6 +461,23 @@ describe("loadWebMedia", () => {
 
     expect(result.kind).toBe("image");
     expect(result.contentType).toBe("image/gif");
+    expect(result.buffer.equals(buffer)).toBe(true);
+  });
+
+  it("preserves in-limit WebP buffers when optimizing direct image buffers", async () => {
+    const { optimizeImageBufferForWebMedia } = await import("./web-media.js");
+    const buffer = createTinyWebp();
+    const result = await optimizeImageBufferForWebMedia({
+      buffer,
+      contentType: "image/webp",
+      fileName: "sticker.webp",
+      maxBytes: 1024,
+      imageCompression: { models: [{ maxSidePx: 64 }] },
+    });
+
+    expect(result.kind).toBe("image");
+    expect(result.contentType).toBe("image/webp");
+    expect(result.fileName).toBe("sticker.webp");
     expect(result.buffer.equals(buffer)).toBe(true);
   });
 

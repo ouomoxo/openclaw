@@ -285,13 +285,13 @@ export function buildDiscordTextChunks(
   return resolveTextChunksWithFallback(text, chunks);
 }
 
-export function toDiscordFileBlob(data: Blob | Uint8Array): Blob {
+export function toDiscordFileBlob(data: Blob | Uint8Array, contentType?: string): Blob {
   if (data instanceof Blob) {
     return data;
   }
   const arrayBuffer = new ArrayBuffer(data.byteLength);
   new Uint8Array(arrayBuffer).set(data);
-  return new Blob([arrayBuffer]);
+  return new Blob([arrayBuffer], contentType ? { type: contentType } : undefined);
 }
 
 async function sendDiscordText(
@@ -387,7 +387,7 @@ async function sendDiscordMedia(
     ? buildDiscordTextChunks(text, { maxLinesPerMessage, chunkMode, maxChars })
     : [];
   const caption = chunks[0] ?? "";
-  const fileData = toDiscordFileBlob(media.buffer);
+  const fileData = toDiscordFileBlob(media.buffer, media.contentType);
   const captionComponents = resolveDiscordSendComponents({
     components,
     text: caption,
