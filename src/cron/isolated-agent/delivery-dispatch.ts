@@ -793,11 +793,37 @@ export async function dispatchCronDelivery(
       deliveryAttempted,
       ...params.telemetry,
     });
+  const waitForDirectCronCleanupDescendants = async (): Promise<void> => {
+    if (!params.job.deleteAfterRun || !isCronSessionKey(params.agentSessionKey)) {
+      return;
+    }
+    const subagentRegistryRuntime = await loadDeliverySubagentRegistryRuntime();
+    const activeSubagentRuns = subagentRegistryRuntime.countActiveDescendantRuns(
+      params.runSessionKey,
+    );
+    if (activeSubagentRuns === 0) {
+      return;
+    }
+    try {
+      const subagentFollowupRuntime = await loadSubagentFollowupRuntime();
+      await subagentFollowupRuntime.waitForDescendantSubagentSummary({
+        sessionKey: params.runSessionKey,
+        initialReply: synthesizedText?.trim(),
+        timeoutMs: params.timeoutMs,
+        observedActiveDescendants: true,
+      });
+    } catch (err) {
+      await logCronDeliveryWarn(
+        `[cron:${params.job.id}] failed while waiting for deleteAfterRun descendants before cleanup: ${formatErrorMessage(err)}`,
+      );
+    }
+  };
   const cleanupDirectCronSessionIfNeeded = async (): Promise<void> => {
     if (directCronSessionDeleted) {
       return;
     }
     directCronSessionDeleted = true;
+    await waitForDirectCronCleanupDescendants();
     await cleanupDirectCronSession({
       job: params.job,
       agentSessionKey: params.agentSessionKey,

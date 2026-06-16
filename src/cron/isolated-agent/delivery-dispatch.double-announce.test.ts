@@ -1684,6 +1684,52 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     });
   });
 
+  it("waits for run-scoped descendants before threaded deleteAfterRun cleanup", async () => {
+    vi.mocked(countActiveDescendantRuns).mockReturnValue(1);
+    vi.mocked(waitForDescendantSubagentSummary).mockImplementationOnce(async () => {
+      expect(callGateway).not.toHaveBeenCalled();
+      vi.mocked(countActiveDescendantRuns).mockReturnValue(0);
+      return undefined;
+    });
+
+    const params = makeBaseParams({ synthesizedText: "Final weather summary" });
+    params.agentSessionKey = "agent:main:cron:test-job";
+    params.runSessionKey = "agent:main:cron:test-job:run:test-session-id";
+    params.resolvedDelivery = makeResolvedDelivery({
+      mode: "implicit",
+      threadId: 42,
+    });
+    (params.job as { deleteAfterRun?: boolean }).deleteAfterRun = true;
+
+    const state = await dispatchCronDelivery(params);
+
+    expect(state.result).toBeUndefined();
+    expect(state.delivered).toBe(true);
+    expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+    expect(countActiveDescendantRuns).toHaveBeenCalledWith(
+      "agent:main:cron:test-job:run:test-session-id",
+    );
+    expect(waitForDescendantSubagentSummary).toHaveBeenCalledWith({
+      sessionKey: "agent:main:cron:test-job:run:test-session-id",
+      initialReply: "Final weather summary",
+      timeoutMs: 30_000,
+      observedActiveDescendants: true,
+    });
+    expect(callGateway).toHaveBeenCalledTimes(1);
+    expect(callGateway).toHaveBeenCalledWith({
+      method: "sessions.delete",
+      params: {
+        key: "agent:main:cron:test-job",
+        deleteTranscript: true,
+        emitLifecycleHooks: false,
+      },
+      timeoutMs: 10_000,
+    });
+    expect(vi.mocked(waitForDescendantSubagentSummary).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(callGateway).mock.invocationCallOrder[0]!,
+    );
+  });
+
   it("delivers structured heartbeat/media payloads once through the outbound adapter", async () => {
     const params = makeBaseParams({ synthesizedText: "HEARTBEAT_OK" });
     params.cfgWithAgentDefaults = {
@@ -1739,6 +1785,52 @@ describe("dispatchCronDelivery — double-announce guard", () => {
       },
       timeoutMs: 10_000,
     });
+  });
+
+  it("waits for run-scoped descendants before structured deleteAfterRun cleanup", async () => {
+    vi.mocked(countActiveDescendantRuns).mockReturnValue(1);
+    vi.mocked(waitForDescendantSubagentSummary).mockImplementationOnce(async () => {
+      expect(callGateway).not.toHaveBeenCalled();
+      vi.mocked(countActiveDescendantRuns).mockReturnValue(0);
+      return undefined;
+    });
+
+    const params = makeBaseParams({ synthesizedText: "HEARTBEAT_OK" });
+    params.agentSessionKey = "agent:main:cron:test-job";
+    params.runSessionKey = "agent:main:cron:test-job:run:test-session-id";
+    params.deliveryPayloadHasStructuredContent = true;
+    params.deliveryPayloads = [
+      { text: "HEARTBEAT_OK", mediaUrl: "https://example.com/img.png" },
+    ] as never;
+    (params.job as { deleteAfterRun?: boolean }).deleteAfterRun = true;
+
+    const state = await dispatchCronDelivery(params);
+
+    expect(state.result).toBeUndefined();
+    expect(state.delivered).toBe(true);
+    expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+    expect(countActiveDescendantRuns).toHaveBeenCalledWith(
+      "agent:main:cron:test-job:run:test-session-id",
+    );
+    expect(waitForDescendantSubagentSummary).toHaveBeenCalledWith({
+      sessionKey: "agent:main:cron:test-job:run:test-session-id",
+      initialReply: "HEARTBEAT_OK",
+      timeoutMs: 30_000,
+      observedActiveDescendants: true,
+    });
+    expect(callGateway).toHaveBeenCalledTimes(1);
+    expect(callGateway).toHaveBeenCalledWith({
+      method: "sessions.delete",
+      params: {
+        key: "agent:main:cron:test-job",
+        deleteTranscript: true,
+        emitLifecycleHooks: false,
+      },
+      timeoutMs: 10_000,
+    });
+    expect(vi.mocked(waitForDescendantSubagentSummary).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(callGateway).mock.invocationCallOrder[0]!,
+    );
   });
 
   it("suppresses NO_REPLY payload with surrounding whitespace", async () => {
