@@ -359,6 +359,8 @@ describe("toSanitizedMarkdownHtml", () => {
   });
 
   describe("code blocks", () => {
+    const blockArt = "  ▀▀▀▀  \n  ▄▄▄▄  \n  ████  ";
+
     it("renders fenced code blocks", () => {
       const html = toSanitizedMarkdownHtml("```ts\nconsole.log(1)\n```");
       const fragment = htmlFragment(html);
@@ -369,6 +371,24 @@ describe("toSanitizedMarkdownHtml", () => {
       expect(copy?.dataset.code).toBe("console.log(1)");
       expect(code?.classList.contains("language-ts")).toBe(true);
       expect(code?.textContent).toBe("console.log(1)\n");
+    });
+
+    it("renders raw block art as a whitespace-preserving code block", () => {
+      const html = toSanitizedMarkdownHtml(blockArt);
+      const fragment = htmlFragment(html);
+      const code = fragment.querySelector("pre code.markdown-block-art");
+
+      expect(fragment.querySelector("p")).toBeNull();
+      expect(code?.textContent).toBe(blockArt);
+    });
+
+    it("marks fenced block art without syntax highlighting", () => {
+      const html = toSanitizedMarkdownHtml(`\`\`\`\n${blockArt}\n\`\`\``);
+      const fragment = htmlFragment(html);
+      const code = fragment.querySelector("pre code.markdown-block-art");
+
+      expect(code?.classList.contains("hljs")).toBe(false);
+      expect(code?.textContent).toBe(`${blockArt}\n`);
     });
 
     it("renders indented code blocks", () => {
@@ -739,6 +759,16 @@ describe("toStreamingPlainTextHtml", () => {
 });
 
 describe("toStreamingMarkdownHtml", () => {
+  it("renders streaming raw block art without collapsing quiet-zone spaces", () => {
+    const blockArt = "  ▀▀▀▀  \n  ▄▄▄▄  \n  ████  ";
+    const html = toStreamingMarkdownHtml(blockArt);
+    const fragment = htmlFragment(html);
+    const code = fragment.querySelector("pre code.markdown-block-art");
+
+    expect(fragment.querySelector("p")).toBeNull();
+    expect(code?.textContent).toBe(blockArt);
+  });
+
   it("renders completed block prefixes as markdown and keeps the open tail plain", () => {
     const html = toStreamingMarkdownHtml("## Done\n\nworking **tail");
 

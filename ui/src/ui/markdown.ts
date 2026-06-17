@@ -86,6 +86,8 @@ const MARKDOWN_PARSE_LIMIT = 40_000;
 const MARKDOWN_CACHE_LIMIT = 200;
 const MARKDOWN_CACHE_MAX_CHARS = 50_000;
 const INLINE_DATA_IMAGE_RE = /^data:image\/[a-z0-9.+-]+;base64,/i;
+const BLOCK_ART_LINE_RE = /^[\t \u00a0▀▄█]+$/u;
+const BLOCK_ART_GLYPH_RE = /[▀▄█]/u;
 const HOST_LOCAL_FILE_HREF_RE =
   /^(?:~\/|\/(?:Users|home|tmp|private\/tmp|var\/folders|private\/var\/folders)\/|\/[A-Za-z]:\/|[A-Za-z]:[\\/])/;
 const DOCS_ORIGIN = "https://docs.openclaw.ai";
@@ -539,6 +541,25 @@ function normalizeMarkdownInput(markdownLocal: string): string {
   return `${truncated.text}${suffix}`.replace(/\r\n?/g, "\n");
 }
 
+export function isMarkdownBlockArtText(value: string): boolean {
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  const artLines = lines.filter((line) => line.trim().length > 0);
+  if (artLines.length < 2) {
+    return false;
+  }
+
+  // QR generators commonly use spaces plus upper/lower/full block glyphs.
+  // Require multiple glyph-only lines so ordinary prose with a stray block character stays markdown.
+  let glyphCount = 0;
+  for (const line of artLines) {
+    if (!BLOCK_ART_LINE_RE.test(line) || !BLOCK_ART_GLYPH_RE.test(line)) {
+      return false;
+    }
+    glyphCount += Array.from(line).filter((char) => BLOCK_ART_GLYPH_RE.test(char)).length;
+  }
+  return glyphCount >= 8;
+}
+
 function getFenceMarker(line: string): { marker: "`" | "~"; length: number } | null {
   const match = FENCE_OPEN_RE.exec(stripFenceContainerPrefixes(line));
   if (!match) {
@@ -691,6 +712,41 @@ function codeClassAttribute(lang: string, highlighted: string): string {
     lang ? `language-${lang}` : "",
   ].filter(Boolean);
   return classes.length > 0 ? ` class="${escapeHtml(classes.join(" "))}"` : "";
+}
+
+function renderCodeElement(text: string, lang: string): string {
+  if (isMarkdownBlockArtText(text)) {
+    return `<pre><code class="markdown-block-art">${escapeHtml(text)}</code></pre>`;
+  }
+  const highlighted = highlightCode(text, lang);
+  const classAttr = codeClassAttribute(lang, highlighted);
+  return `<pre><code${classAttr}>${highlighted}</code></pre>`;
+}
+
+function renderCodeBlock(text: string, lang: string, env: unknown): string {
+  const codeBlock = renderCodeElement(text, lang);
+  if (!shouldRenderCodeBlockCopy(env)) {
+    return codeBlock;
+  }
+  const langLabel = lang ? `<span class="code-block-lang">${escapeHtml(lang)}</span>` : "";
+  const attrSafe = escapeHtml(text);
+  const copyBtn = `<button type="button" class="code-block-copy" data-code="${attrSafe}" aria-label="${escapeHtml(t("common.copyCode"))}"><span class="code-block-copy__idle">${escapeHtml(t("common.copy"))}</span><span class="code-block-copy__done">${escapeHtml(t("common.copied"))}</span></button>`;
+  const header = `<div class="code-block-header">${langLabel}${copyBtn}</div>`;
+
+  const trimmed = text.trim();
+  const isJson =
+    lang === "json" ||
+    (!lang &&
+      ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+        (trimmed.startsWith("[") && trimmed.endsWith("]"))));
+
+  if (isJson) {
+    const lineCount = text.split("\n").length;
+    const label = lineCount > 1 ? `JSON &middot; ${lineCount} lines` : "JSON";
+    return `<details class="json-collapse"><summary>${label}</summary><div class="code-block-wrapper">${header}${codeBlock}</div></details>`;
+  }
+
+  return `<div class="code-block-wrapper">${header}${codeBlock}</div>`;
 }
 
 export const md = new MarkdownIt({
@@ -964,60 +1020,12 @@ md.renderer.rules.fence = (tokens, idx, _options, env) => {
   // token.info contains the full fence info string (e.g., "json title=foo");
   // extract only the first whitespace-separated token as the language.
   const lang = token.info.trim().split(/\s+/)[0] || "";
-  const text = token.content;
-  const highlighted = highlightCode(text, lang);
-  const classAttr = codeClassAttribute(lang, highlighted);
-  const codeBlock = `<pre><code${classAttr}>${highlighted}</code></pre>`;
-  if (!shouldRenderCodeBlockCopy(env)) {
-    return codeBlock;
-  }
-  const langLabel = lang ? `<span class="code-block-lang">${escapeHtml(lang)}</span>` : "";
-  const attrSafe = escapeHtml(text);
-  const copyBtn = `<button type="button" class="code-block-copy" data-code="${attrSafe}" aria-label="${escapeHtml(t("common.copyCode"))}"><span class="code-block-copy__idle">${escapeHtml(t("common.copy"))}</span><span class="code-block-copy__done">${escapeHtml(t("common.copied"))}</span></button>`;
-  const header = `<div class="code-block-header">${langLabel}${copyBtn}</div>`;
-
-  const trimmed = text.trim();
-  const isJson =
-    lang === "json" ||
-    (!lang &&
-      ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-        (trimmed.startsWith("[") && trimmed.endsWith("]"))));
-
-  if (isJson) {
-    const lineCount = text.split("\n").length;
-    const label = lineCount > 1 ? `JSON &middot; ${lineCount} lines` : "JSON";
-    return `<details class="json-collapse"><summary>${label}</summary><div class="code-block-wrapper">${header}${codeBlock}</div></details>`;
-  }
-
-  return `<div class="code-block-wrapper">${header}${codeBlock}</div>`;
+  return renderCodeBlock(token.content, lang, env);
 };
 
 // Override indented code blocks (code_block) with the same treatment as fence
 md.renderer.rules.code_block = (tokens, idx, _options, env) => {
-  const token = tokens[idx];
-  const text = token.content;
-  const highlighted = highlightCode(text, "");
-  const classAttr = codeClassAttribute("", highlighted);
-  const codeBlock = `<pre><code${classAttr}>${highlighted}</code></pre>`;
-  if (!shouldRenderCodeBlockCopy(env)) {
-    return codeBlock;
-  }
-  const attrSafe = escapeHtml(text);
-  const copyBtn = `<button type="button" class="code-block-copy" data-code="${attrSafe}" aria-label="${escapeHtml(t("common.copyCode"))}"><span class="code-block-copy__idle">${escapeHtml(t("common.copy"))}</span><span class="code-block-copy__done">${escapeHtml(t("common.copied"))}</span></button>`;
-  const header = `<div class="code-block-header">${copyBtn}</div>`;
-
-  const trimmed = text.trim();
-  const isJson =
-    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-    (trimmed.startsWith("[") && trimmed.endsWith("]"));
-
-  if (isJson) {
-    const lineCount = text.split("\n").length;
-    const label = lineCount > 1 ? `JSON &middot; ${lineCount} lines` : "JSON";
-    return `<details class="json-collapse"><summary>${label}</summary><div class="code-block-wrapper">${header}${codeBlock}</div></details>`;
-  }
-
-  return `<div class="code-block-wrapper">${header}${codeBlock}</div>`;
+  return renderCodeBlock(tokens[idx].content, "", env);
 };
 
 export function toSanitizedMarkdownHtml(
@@ -1025,22 +1033,32 @@ export function toSanitizedMarkdownHtml(
   options: MarkdownRenderOptions = {},
 ): string {
   const renderOptions = normalizeMarkdownRenderOptions(options);
-  const input = stripUnsupportedCitationControlMarkers(markdownLocal).trim();
+  const rawInput = stripUnsupportedCitationControlMarkers(markdownLocal).replace(/\r\n?/g, "\n");
+  const input = rawInput.trim();
   if (!input) {
     return "";
   }
   installHooks();
-  const cacheKey = `${i18n.getLocale()}\0${renderOptions.codeBlockChrome}\0${input}`;
+  const renderInput = isMarkdownBlockArtText(rawInput) ? rawInput : input;
+  const cacheKey = `${i18n.getLocale()}\0${renderOptions.codeBlockChrome}\0${renderInput}`;
   if (input.length <= MARKDOWN_CACHE_MAX_CHARS) {
     const cached = getCachedMarkdown(cacheKey);
     if (cached !== null) {
       return cached;
     }
   }
-  const truncated = truncateText(input, MARKDOWN_CHAR_LIMIT);
+  const truncated = truncateText(renderInput, MARKDOWN_CHAR_LIMIT);
   const suffix = truncated.truncated
     ? `\n\n… truncated (${truncated.total} chars, showing first ${truncated.text.length}).`
     : "";
+  if (isMarkdownBlockArtText(truncated.text)) {
+    const rendered = renderCodeBlock(`${truncated.text}${suffix}`, "", renderOptions);
+    const sanitized = DOMPurify.sanitize(rendered, sanitizeOptions);
+    if (input.length <= MARKDOWN_CACHE_MAX_CHARS) {
+      setCachedMarkdown(cacheKey, sanitized);
+    }
+    return sanitized;
+  }
   if (truncated.text.length > MARKDOWN_PARSE_LIMIT) {
     // Large plain-text replies should stay readable without inheriting the
     // capped code-block chrome, while still preserving whitespace for logs
@@ -1084,6 +1102,15 @@ export function toStreamingMarkdownHtml(
   markdownLocal: string,
   options: MarkdownRenderOptions = {},
 ): string {
+  const rawInput = stripUnsupportedCitationControlMarkers(markdownLocal).replace(/\r\n?/g, "\n");
+  if (isMarkdownBlockArtText(rawInput)) {
+    installHooks();
+    return DOMPurify.sanitize(
+      renderCodeBlock(rawInput, "", normalizeMarkdownRenderOptions(options)),
+      sanitizeOptions,
+    );
+  }
+
   const input = normalizeMarkdownInput(markdownLocal);
   if (!input) {
     return "";
