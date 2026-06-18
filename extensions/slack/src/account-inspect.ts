@@ -80,6 +80,7 @@ export function inspectSlackAccount(params: {
   const allowEnv = accountId === DEFAULT_ACCOUNT_ID;
   const mode = merged.mode ?? "socket";
   const isHttpMode = mode === "http";
+  const isRelayMode = mode === "relay";
 
   const configBot = inspectSlackToken(merged.botToken);
   const configApp = inspectSlackToken(merged.appToken);
@@ -89,7 +90,7 @@ export function inspectSlackAccount(params: {
   const envBot = allowEnv
     ? normalizeSecretInputString(params.envBotToken ?? process.env.SLACK_BOT_TOKEN)
     : undefined;
-  const envApp = allowEnv
+  const envApp = allowEnv && !isRelayMode
     ? normalizeSecretInputString(params.envAppToken ?? process.env.SLACK_APP_TOKEN)
     : undefined;
   const envUser = allowEnv
@@ -100,6 +101,11 @@ export function inspectSlackAccount(params: {
   const appToken = configApp.token ?? envApp;
   const signingSecret = configSigningSecret.token;
   const userToken = configUser.token ?? envUser;
+  const relayConfigured =
+    isRelayMode &&
+    Boolean(normalizeOptionalString(merged.relay?.url)) &&
+    hasConfiguredSecretInput(merged.relay?.authToken) &&
+    Boolean(normalizeOptionalString(merged.relay?.gatewayId));
   const botTokenSource: SlackTokenSource = configBot.token
     ? "config"
     : configBot.status === "configured_unavailable"
@@ -173,8 +179,10 @@ export function inspectSlackAccount(params: {
     configured: isHttpMode
       ? (configBot.status !== "missing" || Boolean(envBot)) &&
         configSigningSecret.status !== "missing"
-      : (configBot.status !== "missing" || Boolean(envBot)) &&
-        (configApp.status !== "missing" || Boolean(envApp)),
+      : isRelayMode
+        ? (configBot.status !== "missing" || Boolean(envBot)) && relayConfigured
+        : (configBot.status !== "missing" || Boolean(envBot)) &&
+          (configApp.status !== "missing" || Boolean(envApp)),
     config: merged,
     groupPolicy: merged.groupPolicy,
     textChunkLimit: merged.textChunkLimit,
