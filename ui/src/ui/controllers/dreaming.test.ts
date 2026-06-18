@@ -836,6 +836,42 @@ describe("dreaming controller", () => {
     });
   });
 
+  it("patches the configured agent id when the selected id is canonicalized", async () => {
+    const { state, request } = createState();
+    state.selectedAgentId = "team-ops";
+    state.configSnapshot = {
+      hash: "hash-1",
+      config: {
+        agents: {
+          list: [{ id: "Team Ops" }],
+        },
+      },
+    };
+    request.mockResolvedValue({ ok: true });
+
+    const ok = await updateDreamingEnabled(state, true);
+
+    expect(ok).toBe(true);
+    expect(getConfigPatchRawPayload(request)).toEqual({
+      agents: {
+        list: [
+          {
+            id: "Team Ops",
+            memory: {
+              extensions: {
+                "memory-core": {
+                  dreaming: {
+                    enabled: true,
+                  },
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+  });
+
   it("does not inspect the selected memory plugin when patching dreaming", async () => {
     const { state, request } = createState();
     state.configSnapshot = {

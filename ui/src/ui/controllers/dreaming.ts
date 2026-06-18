@@ -1,6 +1,7 @@
 // Control UI controller manages dreaming gateway state.
 import type { GatewayBrowserClient, GatewayHelloOk } from "../gateway.ts";
 import { isPluginEnabledInConfigSnapshot } from "../plugin-activation.ts";
+import { normalizeAgentId } from "../session-key.ts";
 import type { ConfigSnapshot } from "../types.ts";
 
 const DEFAULT_DREAM_DIARY_PATH = "DREAMS.md";
@@ -337,6 +338,21 @@ function normalizeTrimmedString(value: unknown): string | undefined {
 
 function resolveSelectedAgentId(state: DreamingState): string | null {
   return normalizeTrimmedString(state.selectedAgentId) ?? null;
+}
+
+function resolveConfiguredAgentId(
+  configValue: Record<string, unknown> | null,
+  selectedAgentId: string,
+): string {
+  const agents = asRecord(configValue?.agents);
+  const entries = Array.isArray(agents?.list) ? agents.list : [];
+  for (const entry of entries) {
+    const configuredId = normalizeTrimmedString(asRecord(entry)?.id);
+    if (configuredId && normalizeAgentId(configuredId) === selectedAgentId) {
+      return configuredId;
+    }
+  }
+  return selectedAgentId;
 }
 
 function buildSelectedAgentPayloadForAgentId(
@@ -1105,6 +1121,9 @@ export async function updateDreamingEnabled(
     return false;
   }
   const agentId = resolveSelectedAgentId(state);
+  const configAgentId = agentId
+    ? resolveConfiguredAgentId(asRecord(state.configSnapshot.config) ?? null, agentId)
+    : null;
   const dreamingPatch = {
     extensions: {
       [DEFAULT_DREAMING_PLUGIN_ID]: {
@@ -1116,12 +1135,12 @@ export async function updateDreamingEnabled(
   };
   const ok = await writeDreamingPatch(
     state,
-    agentId
+    configAgentId
       ? {
           agents: {
             list: [
               {
-                id: agentId,
+                id: configAgentId,
                 memory: dreamingPatch,
               },
             ],
