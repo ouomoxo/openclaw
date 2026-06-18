@@ -665,6 +665,46 @@ describe("memory-wiki gateway methods", () => {
     });
   });
 
+  it("passes the canonical configured agent scope to shared wiki.search gateway calls", async () => {
+    const { config } = await createVault({ prefix: "memory-wiki-gateway-" });
+    const teamOpsConfig = { ...config, agentId: "team-ops" };
+    const resolveConfig = vi.fn(() => teamOpsConfig);
+    const { api, registerGatewayMethod } = createPluginApi();
+    const appConfig = {
+      agents: {
+        list: [{ id: "Team Ops", default: true }],
+      },
+    };
+
+    registerMemoryWikiGatewayMethods({ api, config, resolveConfig, appConfig });
+    const handler = findGatewayHandler(registerGatewayMethod, "wiki.search");
+    if (!handler) {
+      throw new Error("wiki.search handler missing");
+    }
+
+    await handler({
+      params: {
+        agentId: "Team Ops",
+        query: "sessions",
+        corpus: "memory",
+        backend: "shared",
+      },
+      respond: vi.fn(),
+    });
+
+    expect(resolveConfig).toHaveBeenCalledWith("Team Ops", appConfig);
+    expect(searchMemoryWiki).toHaveBeenCalledWith({
+      config: teamOpsConfig,
+      appConfig,
+      agentId: "team-ops",
+      query: "sessions",
+      maxResults: undefined,
+      searchBackend: "shared",
+      searchCorpus: "memory",
+      mode: undefined,
+    });
+  });
+
   it("registers wiki.ingest with admin scope and keeps compile at write scope", async () => {
     const { config } = await createVault({ prefix: "memory-wiki-gateway-" });
     const { api, registerGatewayMethod } = createPluginApi();

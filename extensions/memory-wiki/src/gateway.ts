@@ -2,6 +2,7 @@
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { resolveDefaultAgentId } from "openclaw/plugin-sdk/memory-host-core";
 import { readPositiveIntegerParam } from "openclaw/plugin-sdk/param-readers";
+import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
 import type { OpenClawConfig, OpenClawPluginApi } from "../api.js";
 import { applyMemoryWikiMutation, normalizeMemoryWikiMutationInput } from "./apply.js";
 import { compileMemoryWikiVault } from "./compile.js";
@@ -107,10 +108,11 @@ export function registerMemoryWikiGatewayMethods(params: {
   const resolveRequestContext = (requestParams: Record<string, unknown> = {}) => {
     const appConfig = resolveAppConfig();
     const agentId = resolveGatewayAgentId(requestParams, appConfig);
+    const config = resolveConfig(agentId, appConfig);
     return {
-      config: resolveConfig(agentId, appConfig),
+      config,
       appConfig,
-      agentId,
+      agentId: config.agentId ?? (agentId ? normalizeAgentId(agentId) : undefined),
     };
   };
 
