@@ -186,11 +186,12 @@ export function resolveNoteColumns(columns: number | undefined): number {
   return columns;
 }
 
-export function resolveNoteOutputColumns(message: string, columns: number): number {
+export function resolveNoteOutputColumns(message: string, columns: number | undefined): number {
+  const outputColumns = resolveNoteColumns(columns);
   const widestLine = message
     .split("\n")
     .reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
-  return Math.max(columns, widestLine + 6);
+  return Math.max(outputColumns, widestLine + 6);
 }
 
 function createNoteOutput(columns: number): NodeJS.WriteStream {

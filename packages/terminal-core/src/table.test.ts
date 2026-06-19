@@ -347,6 +347,7 @@ describe("wrapNoteMessage", () => {
     expect(resolveNoteColumns(1)).toBe(80);
     expect(resolveNoteColumns(79)).toBe(80);
     expect(resolveNoteColumns(120)).toBe(120);
+    expect(resolveNoteOutputColumns("short", 1)).toBe(80);
   });
 
   it("widens note output columns so clack does not re-wrap copy-sensitive lines", () => {
