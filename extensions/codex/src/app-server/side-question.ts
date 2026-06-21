@@ -278,7 +278,7 @@ export async function runCodexAppServerSideQuestion(
     let approvalPolicy = useModelScopedPolicy
       ? modelScopedAppServer.approvalPolicy
       : (binding.approvalPolicy ?? modelScopedAppServer.approvalPolicy);
-    let sandbox = useModelScopedPolicy
+    let appServerSandbox = useModelScopedPolicy
       ? modelScopedAppServer.sandbox
       : (binding.sandbox ?? modelScopedAppServer.sandbox);
     const nativeProviderWebSearchSupport =
@@ -341,7 +341,7 @@ export async function runCodexAppServerSideQuestion(
           autoApprove: shouldAutoApproveCodexAppServerApprovals({
             approvalPolicy,
             networkProxy: modelScopedAppServer.networkProxy,
-            sandbox,
+            sandbox: appServerSandbox,
           }),
           signal: runAbortController.signal,
         });
@@ -437,7 +437,7 @@ export async function runCodexAppServerSideQuestion(
           cwd,
           approvalPolicy,
           approvalsReviewer: modelScopedAppServer.approvalsReviewer,
-          ...(modelScopedAppServer.networkProxy ? {} : { sandbox }),
+          ...(modelScopedAppServer.networkProxy ? {} : { sandbox: appServerSandbox }),
           ...(serviceTier ? { serviceTier } : {}),
           config: threadConfig,
           developerInstructions: SIDE_DEVELOPER_INSTRUCTIONS,
@@ -472,7 +472,7 @@ export async function runCodexAppServerSideQuestion(
     approvalPolicy = useModelScopedPolicy
       ? modelScopedAppServer.approvalPolicy
       : (binding.approvalPolicy ?? modelScopedAppServer.approvalPolicy);
-    sandbox = useModelScopedPolicy
+    appServerSandbox = useModelScopedPolicy
       ? modelScopedAppServer.sandbox
       : (binding.sandbox ?? modelScopedAppServer.sandbox);
     const sideCollector = createCodexTerminalTextCollector(childThreadId, {
@@ -518,7 +518,7 @@ export async function runCodexAppServerSideQuestion(
             cwd,
             approvalPolicy,
             approvalsReviewer: modelScopedAppServer.approvalsReviewer,
-            sandboxPolicy: codexSandboxPolicyForTurn(sandbox, cwd),
+            sandboxPolicy: codexSandboxPolicyForTurn(appServerSandbox, cwd),
             model: activeModel,
             personality: CODEX_NATIVE_PERSONALITY_NONE,
             ...(serviceTier ? { serviceTier } : {}),

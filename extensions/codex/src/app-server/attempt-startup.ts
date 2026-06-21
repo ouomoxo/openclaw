@@ -182,20 +182,6 @@ export async function startCodexAttemptThread(params: {
               .map((plugin) => plugin.configKey)
               .toSorted()
           : undefined;
-        const attemptParams = params.buildAttemptParams();
-        embeddedAgentLog.debug(
-          "codex plugin thread config eligibility",
-          buildCodexPluginThreadConfigEligibilityLogData({
-            sessionId: attemptParams.sessionId,
-            sessionKey: attemptParams.sessionKey ?? "",
-            pluginThreadConfigRequired,
-            resolvedPluginPolicy,
-            enabledPluginConfigKeys,
-            pluginAppCacheKey,
-            startupAuthProfileId: params.startupAuthProfileId,
-            appServer: params.appServer,
-          }),
-        );
         const pluginAppServer = mcpElicitationDelegationRequired
           ? {
               ...params.appServer,
