@@ -65,7 +65,10 @@ describe("resolveCodexProviderWebSearchSupport", () => {
     });
     const client = { request } as unknown as CodexAppServerClient;
     const release = vi.fn();
-    const clientFactory = vi.fn(async () => ({ client, release })) as CodexAppServerClientLeaseFactory;
+    const clientFactory = vi.fn(async () => ({
+      client,
+      release,
+    })) as CodexAppServerClientLeaseFactory;
 
     await expect(resolveSupport(clientFactory)).resolves.toBe("unknown");
     expect(request).toHaveBeenCalledOnce();
