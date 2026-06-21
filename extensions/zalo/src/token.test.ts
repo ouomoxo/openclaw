@@ -6,6 +6,21 @@ import { describe, expect, it } from "vitest";
 import { resolveZaloToken } from "./token.js";
 import type { ZaloConfig } from "./types.js";
 
+function canCreateFileSymlink(dir: string): boolean {
+  const targetPath = path.join(dir, "symlink-probe-target.txt");
+  const linkPath = path.join(dir, "symlink-probe-link.txt");
+  try {
+    fs.writeFileSync(targetPath, "probe", "utf8");
+    fs.symlinkSync(targetPath, linkPath, "file");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(linkPath, { force: true });
+    fs.rmSync(targetPath, { force: true });
+  }
+}
+
 describe("resolveZaloToken", () => {
   it("falls back to top-level token for non-default accounts without overrides", () => {
     const cfg = {
@@ -75,17 +90,26 @@ describe("resolveZaloToken", () => {
     expect(res.source).toBe("config");
   });
 
-  it.runIf(process.platform !== "win32")("rejects symlinked token files", () => {
+  // Keep the local runIf shape while probing inside the test, avoiding
+  // import-time filesystem side effects on hosts that cannot create links.
+  it.runIf(true)("rejects symlinked token files", ({ skip }) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-zalo-token-"));
-    const tokenFile = path.join(dir, "token.txt");
-    const tokenLink = path.join(dir, "token-link.txt");
-    fs.writeFileSync(tokenFile, "file-token\n", "utf8");
-    fs.symlinkSync(tokenFile, tokenLink);
+    try {
+      if (!canCreateFileSymlink(dir)) {
+        skip("file symlinks are unavailable on this host");
+      }
 
-    const cfg = {
-      tokenFile: tokenLink,
-    } as ZaloConfig;
-    expect(() => resolveZaloToken(cfg)).toThrow(/Zalo token file.*must not be a symlink/);
-    fs.rmSync(dir, { recursive: true, force: true });
+      const tokenFile = path.join(dir, "token.txt");
+      const tokenLink = path.join(dir, "token-link.txt");
+      fs.writeFileSync(tokenFile, "file-token\n", "utf8");
+      fs.symlinkSync(tokenFile, tokenLink, "file");
+
+      const cfg = {
+        tokenFile: tokenLink,
+      } as ZaloConfig;
+      expect(() => resolveZaloToken(cfg)).toThrow(/Zalo token file.*must not be a symlink/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
