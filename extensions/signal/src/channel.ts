@@ -22,6 +22,7 @@ import {
 } from "openclaw/plugin-sdk/status-helpers";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveSignalAccount, type ResolvedSignalAccount } from "./accounts.js";
+import { listSignalAliasDirectoryEntries, resolveSignalTarget } from "./aliases.js";
 import {
   shouldSuppressLocalSignalExecApprovalPrompt,
   signalApprovalCapability,
@@ -168,8 +169,9 @@ function resolveSignalOutboundSessionRoute(params: {
   agentId: string;
   accountId?: string | null;
   target: string;
+  resolvedTarget?: { to: string };
 }) {
-  const resolved = resolveSignalOutboundTarget(params.target);
+  const resolved = resolveSignalOutboundTarget(params.resolvedTarget?.to ?? params.target);
   if (!resolved) {
     return null;
   }
@@ -306,7 +308,37 @@ export const signalPlugin: ChannelPlugin<ResolvedSignalAccount, SignalProbe> =
         targetResolver: {
           looksLikeId: looksLikeSignalTargetId,
           hint: "<E.164|uuid:ID|group:ID|signal:group:ID|signal:+E.164>",
+          resolveTarget: async ({ cfg, accountId, input }) => {
+            const target = resolveSignalTarget({ cfg, accountId, input });
+            if (!target) {
+              return null;
+            }
+            return {
+              to: target.to,
+              kind: target.kind,
+              display: target.source === "alias" ? target.alias : undefined,
+              source: target.source === "alias" ? "directory" : "normalized",
+            };
+          },
         },
+      },
+      directory: {
+        listPeers: async ({ cfg, accountId, query, limit }) =>
+          listSignalAliasDirectoryEntries({
+            cfg,
+            accountId,
+            query,
+            limit,
+            kind: "user",
+          }),
+        listGroups: async ({ cfg, accountId, query, limit }) =>
+          listSignalAliasDirectoryEntries({
+            cfg,
+            accountId,
+            query,
+            limit,
+            kind: "group",
+          }),
       },
       heartbeat: {
         sendTyping: async ({ cfg, to, accountId }) => {
@@ -394,6 +426,34 @@ export const signalPlugin: ChannelPlugin<ResolvedSignalAccount, SignalProbe> =
     outbound: {
       base: {
         deliveryMode: "direct",
+        resolveTarget: ({ cfg, to, accountId }) => {
+          const raw = to?.trim();
+          if (!raw) {
+            return { ok: false, error: new Error("Signal target is required") };
+          }
+          let target: ReturnType<typeof resolveSignalTarget>;
+          try {
+            target = resolveSignalTarget({
+              cfg: cfg ?? {},
+              accountId,
+              input: raw,
+            });
+          } catch (error) {
+            return {
+              ok: false,
+              error: error instanceof Error ? error : new Error(String(error)),
+            };
+          }
+          if (!target) {
+            return {
+              ok: false,
+              error: new Error(
+                `Unknown Signal alias or target "${raw}". Configure channels.signal.aliases.${raw.replace(/^signal:/i, "")} or use E.164, uuid:<id>, username:<name>, or group:<id>.`,
+              ),
+            };
+          }
+          return { ok: true, to: target.to };
+        },
         chunker: chunkText,
         chunkerMode: "text",
         textChunkLimit: 4000,
