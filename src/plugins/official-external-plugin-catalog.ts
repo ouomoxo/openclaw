@@ -304,6 +304,9 @@ function resolveHostedCatalogFeedUrl(raw: string): URL {
   if (parsed.protocol !== "https:") {
     throw new Error("hosted catalog feed URL must use HTTPS");
   }
+  if (parsed.username || parsed.password) {
+    throw new Error("hosted catalog feed URL must not include credentials");
+  }
   return parsed;
 }
 
