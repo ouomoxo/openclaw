@@ -52,6 +52,11 @@ openclaw plugins uninstall <id>
 openclaw plugins doctor
 openclaw plugins update <id-or-npm-spec>
 openclaw plugins update --all
+openclaw plugins marketplace entries
+openclaw plugins marketplace entries --offline
+openclaw plugins marketplace entries --json
+openclaw plugins marketplace refresh
+openclaw plugins marketplace refresh --json
 openclaw plugins marketplace list <marketplace>
 openclaw plugins marketplace list <marketplace> --json
 openclaw plugins init <id>
@@ -467,11 +472,20 @@ Use `plugins registry` to inspect whether the persisted registry is present, cur
 ### Marketplace
 
 ```bash
+openclaw plugins marketplace entries
+openclaw plugins marketplace entries --offline
+openclaw plugins marketplace entries --json
+openclaw plugins marketplace refresh
+openclaw plugins marketplace refresh --json
 openclaw plugins marketplace list <source>
 openclaw plugins marketplace list <source> --json
 ```
 
-Marketplace list accepts a local marketplace path, a `marketplace.json` path, a GitHub shorthand like `owner/repo`, a GitHub repo URL, or a git URL. `--json` prints the resolved source label plus the parsed marketplace manifest and plugin entries.
+`plugins marketplace entries` lists entries from the configured OpenClaw marketplace feed. By default it attempts the hosted feed and falls back to the latest accepted snapshot or bundled data. Use `--offline` to read the latest accepted snapshot without fetching the feed.
+
+`plugins marketplace refresh` refreshes the configured hosted feed snapshot and reports whether OpenClaw accepted hosted data, a hosted snapshot, or bundled fallback data. Use `--expected-sha256` when a caller needs the command to fail unless a fresh hosted payload matches a pinned checksum.
+
+Marketplace `list` accepts a local marketplace path, a `marketplace.json` path, a GitHub shorthand like `owner/repo`, a GitHub repo URL, or a git URL. `--json` prints the resolved source label plus the parsed marketplace manifest and plugin entries.
 
 ## Related
 
