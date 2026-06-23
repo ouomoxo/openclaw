@@ -597,6 +597,52 @@ describe("official external plugin catalog", () => {
     expect(snapshot?.metadata.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
+  it("reads the latest accepted snapshot in offline mode without fetching", async () => {
+    const snapshotStore = createInMemoryHostedOfficialExternalPluginCatalogSnapshotStore();
+    const body = JSON.stringify({
+      schemaVersion: 1,
+      id: "openclaw-official-external-plugins",
+      generatedAt: "2026-06-22T00:00:00.000Z",
+      sequence: 5,
+      entries: [
+        {
+          name: "@openclaw/offline-snapshot-proof",
+          kind: "plugin",
+          openclaw: { plugin: { id: "offline-snapshot-proof" } },
+        },
+      ],
+    });
+    const seedFetch = vi.fn(
+      async () =>
+        new Response(body, {
+          status: 200,
+          headers: { etag: '"offline"' },
+        }),
+    );
+    const seeded = await loadHostedOfficialExternalPluginCatalogEntries({
+      snapshotStore,
+      fetchImpl: seedFetch,
+    });
+    if (seeded.source !== "hosted") {
+      throw new Error("expected seeded hosted feed");
+    }
+
+    const offlineFetch = vi.fn(async () => new Response(null, { status: 500 }));
+    const result = await loadHostedOfficialExternalPluginCatalogEntries({
+      snapshotStore,
+      fetchImpl: offlineFetch,
+      offline: true,
+    });
+
+    expect(offlineFetch).not.toHaveBeenCalled();
+    expect(result.source).toBe("hosted-snapshot");
+    expect(result.entries.map((entry) => entry.name)).toEqual(["@openclaw/offline-snapshot-proof"]);
+    if (result.source === "hosted-snapshot") {
+      expect(result.error).toBe("hosted catalog feed offline mode");
+      expect(result.metadata.checksum).toBe(seeded.metadata.checksum);
+    }
+  });
+
   it("persists hosted feed snapshots in OpenClaw state for HTTP 304 reuse", async () => {
     const stateDir = mkdtempSync(path.join(os.tmpdir(), "openclaw-hosted-catalog-"));
     try {
