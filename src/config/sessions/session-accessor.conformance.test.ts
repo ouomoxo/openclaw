@@ -15,16 +15,13 @@ import {
   appendTranscriptMessage,
   cleanupSessionLifecycleArtifacts,
   listSessionEntries,
-  loadExactSessionEntry,
   loadSessionEntry,
-  loadTranscriptEvents,
   patchSessionEntry,
   publishTranscriptUpdate,
   readSessionUpdatedAt,
   replaceSessionEntry,
   updateSessionEntry,
   upsertSessionEntry,
-  type ExactSessionEntry,
   type SessionAccessScope,
   type SessionEntrySummary,
   type SessionTranscriptAccessScope,
@@ -57,6 +54,8 @@ import {
   updateSqliteSessionEntry,
   upsertSqliteSessionEntry,
 } from "./session-accessor.sqlite.js";
+import { loadSessionStore } from "./store.js";
+import { streamSessionTranscriptLines } from "./transcript-stream.js";
 import type { SessionCompactionCheckpoint, SessionEntry } from "./types.js";
 
 // Keep accessor conformance independent of any real openclaw.json on the machine.
@@ -113,6 +112,11 @@ type AccessorAdapter = {
   ): Promise<void>;
 };
 
+type ExactSessionEntry = {
+  entry: SessionEntry;
+  sessionKey: string;
+};
+
 type TestPaths = {
   sqlitePath: string;
   stateDir: string;
@@ -140,7 +144,7 @@ const fileBackedAdapter: AccessorAdapter = {
     storePath: paths.storePath,
   }),
   loadSessionEntry,
-  loadExactSessionEntry,
+  loadExactSessionEntry: loadExactFileSessionEntry,
   listSessionEntries,
   readSessionUpdatedAt,
   upsertSessionEntry,
@@ -148,11 +152,35 @@ const fileBackedAdapter: AccessorAdapter = {
   patchSessionEntry,
   updateSessionEntry,
   cleanupSessionLifecycleArtifacts,
-  loadTranscriptEvents,
+  loadTranscriptEvents: loadFileTranscriptEvents,
   appendTranscriptEvent,
   appendTranscriptMessage,
   publishTranscriptUpdate,
 };
+
+function loadExactFileSessionEntry(scope: SessionAccessScope): ExactSessionEntry | undefined {
+  const sessionKey = scope.sessionKey.trim();
+  const storePath = scope.storePath?.trim();
+  if (!sessionKey || !storePath) {
+    return undefined;
+  }
+  const entry = loadSessionStore(storePath)[sessionKey];
+  return entry ? { sessionKey, entry: structuredClone(entry) } : undefined;
+}
+
+async function loadFileTranscriptEvents(
+  scope: SessionTranscriptReadScope,
+): Promise<TranscriptEvent[]> {
+  const sessionFile = scope.sessionFile?.trim();
+  if (!sessionFile) {
+    throw new Error("file-backed conformance reads require an explicit session file");
+  }
+  const events: TranscriptEvent[] = [];
+  for await (const line of streamSessionTranscriptLines(sessionFile)) {
+    events.push(JSON.parse(line) as TranscriptEvent);
+  }
+  return events;
+}
 
 const sqliteAdapter: AccessorAdapter = {
   name: "sqlite",

@@ -21,7 +21,6 @@ import {
   type OpenClawAgentDatabaseOptions,
 } from "../../state/openclaw-agent-db.js";
 import type {
-  ExactSessionEntry,
   SessionAccessScope,
   SessionEntryPatchContext,
   SessionEntryPatchOptions,
@@ -67,6 +66,10 @@ type ResolvedSessionEntryRow = {
 };
 type SqliteSessionEntryPatchOptions = SessionEntryPatchOptions & {
   skipMaintenance?: boolean;
+};
+export type SqliteExactSessionEntry = {
+  entry: SessionEntry;
+  sessionKey: string;
 };
 
 type ResolvedSqliteScope = {
@@ -147,7 +150,7 @@ export function loadSqliteSessionEntry(scope: SessionAccessScope): SessionEntry 
 /** Loads one exact persisted-key entry from the additive SQLite session store. */
 export function loadExactSqliteSessionEntry(
   scope: SessionAccessScope,
-): ExactSessionEntry | undefined {
+): SqliteExactSessionEntry | undefined {
   const sessionKey = scope.sessionKey.trim();
   if (!sessionKey) {
     return undefined;
