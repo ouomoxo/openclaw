@@ -13,6 +13,13 @@ Companion: [`12-agent-run-adapter-boundary.md`](./12-agent-run-adapter-boundary.
 > modules. Making the runtime drivable from an OV adapter is _additive_ (a bridge +
 > a real receiver), and per the runtime's own ADR lands with **zero core patches**.
 
+> **Consistency note.** These runtime facts are reconciled with the accepted OV
+> design (OV `feat/windows-port` @ `172e9a0`, consistency PR #13). In particular the
+> real `RuntimeSecurityPosture` here (§S7) is the source of truth for the OV wire
+> posture: 5 derived boundary booleans + derived `productionEligible`, **no
+> `credentialsIsolated`** — see the field mapping in
+> [`12-agent-run-adapter-boundary.md`](./12-agent-run-adapter-boundary.md) §result.
+
 ## S0. Plugin shell — inert by design
 
 - `index.ts:7-14` — `definePluginEntry({ id:"agent-runtime", register(){} })`; the

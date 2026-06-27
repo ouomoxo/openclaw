@@ -11,6 +11,16 @@ shapes). `path:line` references are to this repo unless prefixed `OV:`.
 > meet. It is the security choke point: it resolves `repositoryKey → path`, refuses
 > anything non-fixture, and never lets a host path or a host secret cross either way.
 
+> **Consistency with the accepted OV design (F1–F6).** This doc is reconciled against
+> the merged OV design + ADR-004/005 (OV `feat/windows-port` @ `172e9a0`, consistency
+> PR #13). Aligned points: **F1** `attempt` is a positive integer (no `attemptId`);
+> **F2** wire posture carries only OpenClaw-derived fields (5 booleans + derived
+> `productionEligible`, **no `credentialsIsolated`** — `src/types.ts:52-60`,
+> `src/security-posture.ts:27-54`); **F4** the bridge claims with a stable
+> `idempotencyKey`/`correlationId`; **F5** the dispatch carries `trustLevel` and the
+> adapter refuses on trust disagreement (`production↔untrusted`); **F6** the ingestion
+> key is `(agentRunId, attempt, sequence)` with a retryable gap and no OV-side buffer.
+
 ## Where the adapter lives
 
 The recommended realization (OV ADR-004 = Pull/Claim via an `ov_agent_run` bridge,
@@ -31,7 +41,8 @@ No runtime `src/*` is modified; the bridge imports the runtime's internal module
 | --------------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `repository.repositoryKey`                                      | `repository.path`                                    | **resolved** via the bridge's allowlist (`WorkerDeps.allowedRepositoryRoots`, `worker.ts:43`); unknown key → refuse, never execute                               |
 | `repository.baseRevision`                                       | `repository.baseRevision` (+ `baseBranch`)           | required; leading-dash rejected by worktree prep                                                                                                                 |
-| `agentRunId / attemptId / taskId / correlationId`               | `runId` (= per-attempt) `/ taskId / correlationId`   | `runId` is OpenClaw's per-attempt execution id; `agentRunId/attemptId` are echoed back on every report, never invented here                                      |
+| `repository.trustLevel` (`fixture\|trusted-local\|production`)  | selects `RepositoryExecutionProfile.trustLevel`      | F5: claim refused on trust disagreement (`production↔untrusted`); fixture-only first slice (see §profile)                                                        |
+| `agentRunId / attempt / taskId / correlationId`                 | `runId` (= per-attempt) `/ taskId / correlationId`   | `runId` is OpenClaw's per-attempt execution id; `agentRunId/attempt` are echoed back on every report, never invented here                                        |
 | `objective / acceptanceCriteria / verificationCommands`         | same                                                 | pass-through                                                                                                                                                     |
 | `permissions{ network:false, gitPush:false, deployment:false }` | `permissions` (same caps, type-enforced)             | `validateRuntimeRunInput` re-rejects `network/gitPush/deployment = true` (`src/input.ts`) — **defense in depth**, even though the wire type already forbids them |
 | `limits{ timeoutMs, maxOutputBytes }`                           | `limits{ timeoutMs, maxOutputBytes, maxProcesses? }` | pass-through                                                                                                                                                     |
@@ -42,25 +53,30 @@ is the sole resolver. **Never** does the model/worker influence `securityPosture
 
 ## §profile selection — trust gate (two independent guards)
 
-The adapter chooses a `RepositoryExecutionProfile` (`src/repository-profile.ts`) for
-the resolved repo. First slice = `FIXTURE_PROFILE` (`:5-11`) only. `runWorker` calls
-`gateRepositoryTrust` (`:16-39`) internally and the adapter **also** refuses a
-non-fixture dispatch before calling `runWorker`. OV refuses dispatch-side too
-(`OV: 04 §repository-resolution`). Three guards, all must pass: OV dispatch gate →
-adapter pre-check → runtime `gateRepositoryTrust`.
+The dispatch carries an OV-owned `repository.trustLevel`
+(`fixture | trusted-local | production`, `OV: 04 §dispatch`). The adapter chooses a
+`RepositoryExecutionProfile` (`src/repository-profile.ts`) for the resolved repo —
+first slice = `FIXTURE_PROFILE` (`:5-11`) only — and **refuses the claim if the
+dispatch `trustLevel` disagrees with OpenClaw's own classification** under the
+cross-repo mapping `fixture↔fixture`, `trusted-local↔trusted-local`,
+**`production↔untrusted`** (OpenClaw's enum is `fixture|trusted-local|untrusted`,
+`src/types.ts:40`; `untrusted` is rejected at `:31-36`). `runWorker` then calls
+`gateRepositoryTrust` (`:16-39`) internally as well. Three independent guards, all
+must pass: OV dispatch gate → adapter trust-agreement pre-check → runtime
+`gateRepositoryTrust`.
 
 ## §result translation — `WorkerRunResult` → OV terminal result
 
 `WorkerRunResult` (`src/worker.ts:63-72`) is the single source:
 
-| OpenClaw                              | OV `RuntimeTerminalResult` (`OV: 04 §result`)    | Rule                                                                                                                          |
-| ------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `status` (`WorkerRunStatus`)          | `status: succeeded\|failed\|blocked\|cancelled`  | `completed → succeeded` **only if** verification evidence consistent (else `failed`); `blocked/cancelled/failed` map directly |
-| `verification` (`VerificationReport`) | `verification: VerificationEvidenceDescriptor[]` | required-and-passed is the **success gate** (OV invariant 5)                                                                  |
-| `artifacts: RuntimeArtifact[]`        | `artifacts: RuntimeArtifactDescriptor[]`         | `relativePath` → opaque `storage.reference`; **no host path**                                                                 |
-| `securityPosture`                     | `securityPosture`                                | verbatim derived posture; OV compares requested vs applied                                                                    |
-| `forbiddenChanges`                    | (→ `failed` + `blockers[]`)                      | a forbidden change present ⇒ never `succeeded`                                                                                |
-| `events: RuntimeEvent[]`              | mapped per `§event-mapping`                      | source for incremental `ReportAgentRunEvent`s                                                                                 |
+| OpenClaw                              | OV `RuntimeTerminalResult` (`OV: 04 §result`)    | Rule                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status` (`WorkerRunStatus`)          | `status: succeeded\|failed\|blocked\|cancelled`  | `completed → succeeded` **only if** verification evidence consistent (else `failed`); `blocked/cancelled/failed` map directly                                                                                                                                                                                                                                                |
+| `verification` (`VerificationReport`) | `verification: VerificationEvidenceDescriptor[]` | required-and-passed is the **success gate** (OV invariant 5)                                                                                                                                                                                                                                                                                                                 |
+| `artifacts: RuntimeArtifact[]`        | `artifacts: RuntimeArtifactDescriptor[]`         | `relativePath` → opaque `storage.reference`; **no host path**                                                                                                                                                                                                                                                                                                                |
+| `securityPosture`                     | `securityPosture` (5 wire booleans)              | adapter renames OpenClaw's derived fields to the wire names (`processIsolated←processUserVerifiedNonRoot`, `networkIsolationEnforced←networkIsolationVerified`, `resourceLimitsEnforced←resourceLimitsVerified`); **no `credentialsIsolated`** (OpenClaw derives no such field, `src/types.ts:52-60`); never model-set; OV compares requested vs applied (`OV: 04 §posture`) |
+| `forbiddenChanges`                    | (→ `failed` + `blockers[]`)                      | a forbidden change present ⇒ never `succeeded`                                                                                                                                                                                                                                                                                                                               |
+| `events: RuntimeEvent[]`              | mapped per `§event-mapping`                      | source for incremental `ReportAgentRunEvent`s                                                                                                                                                                                                                                                                                                                                |
 
 The adapter **must not** self-declare success: it forwards evidence; OV's decider
 applies the 11-point success invariant (`OV: 04 §success`). `Worker completed ≠ Task
@@ -83,17 +99,24 @@ telemetry:
 | `RUN_COMPLETED`                                           | (terminal → `ReportAgentRunResult`, not an event) |
 | `COMMAND_* / WORKTREE_* / CLEANUP_* / EXECUTOR_COMPLETED` | **not forwarded** (operational telemetry)         |
 
-The per-run monotonic `sequence` + `eventId` (`events.ts:5-39`) become the OV
-ingestion idempotency key `(agentRunId, attemptId, eventId/sequence)`.
+The per-run monotonic `sequence` + `eventId` (`events.ts:5-39`) feed the OV
+ingestion key **`(agentRunId, attempt, sequence)`**, with `eventId`/payload-fingerprint
+as the dedup-vs-conflict discriminator. A gap (`sequence > expected`) is **retryable
+`EVENT_SEQUENCE_GAP`** — OV does not buffer; the outbox re-delivers from the missing
+sequence (`OV: ADR-005 §sequence-gap`). `attempt` is a **positive integer** (no
+`attemptId` string id — `OV: ADR-005 §attempt`).
 
 ## §idempotency — adapter responsibilities
 
 The adapter relies on the durable outbox (`11 §S5`) for at-least-once delivery and on
 OV for dedup. It must: (1) send each event/result with its stable `eventId`/
 `resultId` so OV dedups (`OV: 04 §idempotency`); (2) on OpenClaw restart, re-send
-`listPending` items — OV treats redelivery as a no-op; (3) re-claim of the same
-dispatch returns the same lease and **does not** start a second `runWorker` (one
-attempt = one `runWorker` invocation, keyed by `dispatchId`/`runId`).
+`listPending` items — OV treats redelivery as a no-op; (3) **claim with a stable
+`idempotencyKey`** (+ `correlationId`) so a response-loss retry re-receives the same
+lease (`deduplicated=true`) and **does not** start a second `runWorker` (one attempt =
+one `runWorker` invocation, keyed by the claim `idempotencyKey` → `dispatchId`/`runId`;
+`OV: 04 §claim`). The claim fingerprint excludes time-varying values so a genuine
+retry hashes identically.
 
 ## §cancellation — OV intent → AbortSignal
 
@@ -109,7 +132,7 @@ slice may leave actual cancel execution stubbed but the mapping is fixed.
 On bridge/runtime restart the adapter calls `inspectRecovery` (`11 §S9`) →
 `running|orphaned|unknown` and reports it to OV, which decides
 `LOST`/recovery-grace/reclaim (`OV: 03 §loss`). The adapter **never** auto-re-executes
-an attempt; a reclaim is a new `attemptId` driven by an explicit OV command.
+an attempt; a reclaim is a new `attempt` driven by an explicit OV command.
 
 ## §secrets & redaction — the choke point
 
