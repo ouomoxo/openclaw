@@ -1,0 +1,44 @@
+{
+  "id": "ov-bridge",
+  "enabledByDefault": false,
+  "activation": {
+    "onStartup": false
+  },
+  "name": "OV Bridge",
+  "description": "OV Control Plane bridge. Registers ov_create_task for the Intake agent (first vertical slice).",
+  "contracts": {
+    "tools": ["ov_create_task"]
+  },
+  "toolMetadata": {
+    "ov_create_task": {
+      "optional": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiBaseUrl": {
+        "type": "string",
+        "description": "OV API base URL, e.g. https://ov.example/api/agent/v1 (https, or loopback/private host for tests)."
+      },
+      "serviceToken": {
+        "type": "string",
+        "description": "OV service Bearer token. Prefer the OV_SERVICE_TOKEN env var; never commit this."
+      },
+      "contractVersion": {
+        "type": "string",
+        "enum": ["1.0"],
+        "description": "Wire contract version. Default 1.0."
+      },
+      "requestTimeoutMs": {
+        "type": "number",
+        "description": "Per-request timeout in ms. Default 10000."
+      },
+      "maxRetries": {
+        "type": "number",
+        "description": "Additional attempts after the first for retryable failures. Default 2."
+      }
+    }
+  }
+}
