@@ -14,3 +14,15 @@ export function redactSecrets(text: string): string {
     .replace(BEARER, "Bearer [REDACTED]")
     .replace(AWS, "[REDACTED]");
 }
+
+/** Safe, bounded error message: first line only, absolute paths stripped, length-capped. */
+export function safeErrorMessage(input: unknown, max = 200): string {
+  let text =
+    typeof input === "string" ? input : input instanceof Error ? input.message : "Unknown error";
+  text = text.split("\n")[0] ?? text;
+  text = text.replace(/(?:\/[^\s:]+)+/g, "[path]").replace(/[A-Za-z]:\\[^\s:]+/g, "[path]");
+  if (text.length > max) {
+    text = `${text.slice(0, max)}…`;
+  }
+  return text.trim() || "Unknown error";
+}
