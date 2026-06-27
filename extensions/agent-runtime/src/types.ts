@@ -64,6 +64,30 @@ export interface ChangedFile {
   changeType: "created" | "modified" | "deleted";
 }
 
+export type RuntimeArtifactType =
+  | "git-diff"
+  | "git-status"
+  | "changed-files"
+  | "command-stdout"
+  | "command-stderr"
+  | "test-report"
+  | "build-report"
+  | "executor-result"
+  | "security-posture";
+
+export interface RuntimeArtifact {
+  artifactId: string;
+  taskId: string;
+  runId: string;
+  type: RuntimeArtifactType;
+  /** Path relative to the artifact store root — never an absolute host path. */
+  relativePath: string;
+  sha256: string;
+  sizeBytes: number;
+  mimeType?: string;
+  createdAt: string;
+}
+
 export interface CommandEvidence {
   commandId: string;
   command: string;

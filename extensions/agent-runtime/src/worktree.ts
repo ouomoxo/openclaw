@@ -89,7 +89,8 @@ export function createDefaultGitRunner(timeoutMs = 30_000): GitRunner {
       });
       child.on("close", (code) => {
         clearTimeout(timer);
-        resolveResult({ code: code ?? -1, stdout: stdout.trim(), stderr: stderr.trim() });
+        // Raw output — callers trim where needed (porcelain -z and binary diff must NOT be trimmed).
+        resolveResult({ code: code ?? -1, stdout, stderr });
       });
     });
 }
@@ -113,7 +114,7 @@ export class WorktreeManager {
     if (topLevel.code !== 0) {
       return blocked("NOT_A_GIT_REPOSITORY", "repository path is not a git repository");
     }
-    const gitRoot = topLevel.stdout;
+    const gitRoot = topLevel.stdout.trim();
     if (!withinAny(gitRoot, input.allowedRepositoryRoots)) {
       return blocked("GIT_ROOT_NOT_ALLOWLISTED", "resolved git root is not within an allowed root");
     }
@@ -123,7 +124,7 @@ export class WorktreeManager {
     if (baseRef.code !== 0) {
       return blocked("BASE_BRANCH_UNRESOLVED", `cannot resolve base branch '${input.baseBranch}'`);
     }
-    const baseRevision = baseRef.stdout;
+    const baseRevision = baseRef.stdout.trim();
     if (input.baseRevision !== undefined && input.baseRevision !== baseRevision) {
       return blocked(
         "BASE_REVISION_MISMATCH",
