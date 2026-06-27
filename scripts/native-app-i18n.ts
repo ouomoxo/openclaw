@@ -170,6 +170,9 @@ function isTranslatableCandidate(source: string, kind: string): boolean {
   if (/^[a-z0-9_.:/$-]+$/u.test(source) || /^[A-Z0-9_.:/$-]+$/u.test(source)) {
     return false;
   }
+  if (/[{}[\]]/u.test(source) && !/(?:\\\(|\$\{)/u.test(source)) {
+    return false;
+  }
   return kind !== "plist-string" || /\s/u.test(source);
 }
 
