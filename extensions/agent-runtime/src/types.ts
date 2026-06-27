@@ -39,7 +39,8 @@ export interface RuntimeRunInput {
 export interface RepositoryExecutionProfile {
   trustLevel: "fixture" | "trusted-local" | "untrusted";
   allowedExecutables: string[];
-  allowedVerificationCommands: string[];
+  /** Allowed verification commands as argv arrays, e.g. [["node","--test"],["npm","test"]]. */
+  allowedVerificationCommands: string[][];
   allowDependencyInstall: boolean;
   networkAllowed: boolean;
 }
@@ -73,12 +74,16 @@ export interface CommandEvidence {
   stderrArtifactId?: string;
 }
 
+export type VerificationType = "test" | "lint" | "typecheck" | "build" | "custom";
+
 export interface VerificationEvidence {
   id: string;
-  type: string;
-  command: string;
+  type: VerificationType;
+  executable: string;
+  args: string[];
   status: "passed" | "failed" | "timed-out" | "cancelled";
   exitCode?: number;
+  signal?: string;
   durationMs: number;
   stdoutArtifactId?: string;
   stderrArtifactId?: string;

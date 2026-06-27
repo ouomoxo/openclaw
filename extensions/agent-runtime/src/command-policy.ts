@@ -108,11 +108,13 @@ export function validateCommand(input: CommandValidationInput): CommandValidatio
 
   const highRisk = isHighRiskCommand(input.executable, input.args);
   const fullCommand = [exe, ...input.args].join(" ");
+  const allowedVerification = matchesAllowedVerification(
+    exe,
+    input.args,
+    input.profile.allowedVerificationCommands,
+  );
 
-  if (
-    input.kind === "verification" &&
-    !input.profile.allowedVerificationCommands.includes(fullCommand)
-  ) {
+  if (input.kind === "verification" && !allowedVerification) {
     return {
       ok: false,
       code: "VERIFICATION_NOT_ALLOWLISTED",
@@ -120,7 +122,7 @@ export function validateCommand(input: CommandValidationInput): CommandValidatio
     };
   }
   // High-risk commands must be explicitly listed as a verification command; never allowed implicitly.
-  if (highRisk && !input.profile.allowedVerificationCommands.includes(fullCommand)) {
+  if (highRisk && !allowedVerification) {
     return {
       ok: false,
       code: "HIGH_RISK_NOT_EXPLICIT",
@@ -129,4 +131,18 @@ export function validateCommand(input: CommandValidationInput): CommandValidatio
   }
 
   return { ok: true, highRisk };
+}
+
+/** Exact argv match against the profile's allowed verification commands (executable compared by basename). */
+export function matchesAllowedVerification(
+  exe: string,
+  args: string[],
+  allowed: string[][],
+): boolean {
+  return allowed.some(
+    (a) =>
+      a.length === args.length + 1 &&
+      exeName(a[0] ?? "") === exe &&
+      a.slice(1).every((x, i) => x === args[i]),
+  );
 }

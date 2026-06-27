@@ -8,7 +8,10 @@ import type { RepositoryExecutionProfile } from "../src/types.js";
 const profile: RepositoryExecutionProfile = {
   trustLevel: "fixture",
   allowedExecutables: ["git", "vitest", "node", "npx"],
-  allowedVerificationCommands: ["vitest run", "npx tsc"],
+  allowedVerificationCommands: [
+    ["vitest", "run"],
+    ["npx", "tsc"],
+  ],
   allowDependencyInstall: false,
   networkAllowed: false,
 };
