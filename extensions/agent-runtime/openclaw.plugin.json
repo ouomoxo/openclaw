@@ -1,0 +1,19 @@
+{
+  "id": "agent-runtime",
+  "enabledByDefault": false,
+  "activation": {
+    "onStartup": false
+  },
+  "name": "Agent Execution Runtime",
+  "description": "Experimental worker-run execution runtime over ACP. fixture/temp repositories only; not production-eligible.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "runtimeRoot": {
+        "type": "string",
+        "description": "Root dir for workspaces/artifacts/homes, e.g. /var/lib/openclaw-agent-runtime."
+      }
+    }
+  }
+}
