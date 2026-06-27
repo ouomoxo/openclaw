@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { ArtifactCollector } from "../src/artifact-collector.js";
 import { createRuntimeCommandRunner } from "../src/command-runner.js";
 import type { Executor, ExecutorHandle, ExecutorInput, ExecutorSnapshot } from "../src/executor.js";
-import { createInMemoryOutboxStore } from "../src/outbox.js";
-import type { ProcessRunResult } from "../src/process-runner.js";
+import { createInMemoryOutboxStore, type OutboxStore } from "../src/outbox.js";
+import type { ProcessRunner, ProcessRunResult } from "../src/process-runner.js";
 import { createMockReceiver, type MockReceiver } from "../src/receiver.js";
 import { defaultExperimentalPosture } from "../src/security-posture.js";
 import type { ExecutorResult, RepositoryExecutionProfile, RuntimeRunInput } from "../src/types.js";
@@ -120,11 +120,13 @@ export function makeHarness(
     verificationResult?: ProcessRunResult;
     profile?: RepositoryExecutionProfile;
     abortSignal?: AbortSignal;
+    outbox?: OutboxStore;
+    processRunner?: ProcessRunner;
   } = {},
 ): Harness {
   const { repoRoot } = makeFixtureRepo();
   const runtimeRoot = mkdtempSync(join(tmpdir(), "ar-e2e-rt-"));
-  const outbox = createInMemoryOutboxStore();
+  const outbox = opts.outbox ?? createInMemoryOutboxStore();
   const receiver = opts.receiver ?? createMockReceiver();
   const executor =
     opts.executor ?? new FakeExecutor({ writes: [{ name: "a.txt", content: "one\ntwo\n" }] });
@@ -140,7 +142,7 @@ export function makeHarness(
       termination: "exit",
       durationMs: 1,
     };
-  const commandRunner = createRuntimeCommandRunner(processRunner);
+  const commandRunner = createRuntimeCommandRunner(opts.processRunner ?? processRunner);
   const verificationRunner = createVerificationRunner(commandRunner);
 
   const deps: WorkerDeps = {
