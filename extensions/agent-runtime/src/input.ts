@@ -2,6 +2,10 @@
 import type { ParseResult, ValidationIssue } from "./parse.js";
 import type { RuntimeRunInput } from "./types.js";
 
+function safeId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._-]+$/.test(value) && !value.includes("..");
+}
+
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -21,13 +25,13 @@ export function validateRuntimeRunInput(raw: unknown): ParseResult<RuntimeRunInp
   if (r.role !== "worker") {
     add("/role", 'role must be "worker"');
   }
-  if (!nonEmptyString(r.taskId)) {
+  if (!safeId(r.taskId)) {
     add("/taskId", "taskId is required");
   }
-  if (!nonEmptyString(r.runId)) {
+  if (!safeId(r.runId)) {
     add("/runId", "runId is required");
   }
-  if (!nonEmptyString(r.correlationId)) {
+  if (!safeId(r.correlationId)) {
     add("/correlationId", "correlationId is required");
   }
   if (!nonEmptyString(r.objective)) {

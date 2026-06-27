@@ -14,15 +14,16 @@ import type { GitRunner } from "./worktree.js";
 import { createDefaultGitRunner } from "./worktree.js";
 
 const BLOCKED_FILE = [
-  /(^|\/)\.env(\..+)?$/,
-  /\.pem$/,
-  /\.key$/,
-  /(^|\/)id_rsa$/,
-  /(^|\/)id_ed25519$/,
+  /(^|\/)\.env(\..+)?$/i,
+  /\.(pem|key|p12|pfx|jks|keystore|p8|ppk)$/i,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)$/i,
   /(^|\/)credentials.*$/i,
-  /(^|\/)secrets.*$/i,
-  /(^|\/)\.npmrc$/,
-  /(^|\/)\.netrc$/,
+  /(^|\/)\.?secrets.*$/i,
+  /(^|\/)\.npmrc$/i,
+  /(^|\/)\.netrc$/i,
+  /(^|\/)\.git-credentials$/i,
+  /(^|\/)kubeconfig$/i,
+  /(^|\/)\.kube\/config$/i,
 ];
 
 export function isForbiddenChangedFile(path: string): boolean {
@@ -95,15 +96,18 @@ export class ArtifactCollector {
     ]);
     const changedFiles = parsePorcelainZ(statusRes.stdout);
     const forbiddenChanges = changedFiles.filter((c) => isForbiddenChangedFile(c.path));
-    const artifacts = [
+    const artifacts: RuntimeArtifact[] = [
       this.collectText("git-status", "git-status.txt", statusRes.stdout.split("\u0000").join("\n")),
-      this.collectText("git-diff", "git-diff.patch", diffRes.stdout),
       this.collectText(
         "changed-files",
         "changed-files.json",
         JSON.stringify(changedFiles, null, 2),
       ),
     ];
+    // H2/M4: do not persist the diff (which carries file content) when a forbidden file changed.
+    if (forbiddenChanges.length === 0) {
+      artifacts.push(this.collectText("git-diff", "git-diff.patch", diffRes.stdout));
+    }
     return {
       artifacts,
       changedFiles,

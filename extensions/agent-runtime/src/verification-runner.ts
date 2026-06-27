@@ -147,7 +147,10 @@ export function createVerificationRunner(commandRunner: RuntimeCommandRunner): V
       }
 
       const allPassed =
-        rejected.length === 0 && !cancelled && evidences.every((e) => e.status === "passed");
+        rejected.length === 0 &&
+        !cancelled &&
+        evidences.length > 0 &&
+        evidences.every((e) => e.status === "passed");
       return { evidences, outputs, rejected, allPassed, cancelled };
     },
   };

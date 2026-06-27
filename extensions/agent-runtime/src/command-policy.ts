@@ -41,11 +41,11 @@ export function isHighRiskCommand(executable: string, args: string[]): boolean {
   }
   if (
     (exe === "node" || exe === "bun" || exe === "deno") &&
-    args.some((a) => /^(-e|-p|--eval|--print)$/.test(a))
+    args.some((a) => /^(-e|-p|--eval|--print)(=|$)/.test(a) || /^(-r|--require|--import)$/.test(a))
   ) {
     return true;
   }
-  if ((exe === "python" || exe === "python3") && args.some((a) => a === "-c")) {
+  if ((exe === "python" || exe === "python3") && args.some((a) => a === "-c" || a === "-m")) {
     return true;
   }
   return false;

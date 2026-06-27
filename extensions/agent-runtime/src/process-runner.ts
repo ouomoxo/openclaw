@@ -58,6 +58,18 @@ class Capture {
 }
 
 /** Default runner: env-replacing argv spawn with timeout (SIGKILL), abort, byte-capped output. */
+function killChildGroup(child: { pid?: number; kill: (s: NodeJS.Signals) => boolean }): void {
+  try {
+    if (child.pid) {
+      process.kill(-child.pid, "SIGKILL");
+    } else {
+      child.kill("SIGKILL");
+    }
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
+
 export function createSpawnProcessRunner(): ProcessRunner {
   return (spec) =>
     new Promise<ProcessRunResult>((resolveResult) => {
@@ -94,7 +106,7 @@ export function createSpawnProcessRunner(): ProcessRunner {
       let child;
       try {
         // env REPLACED — child sees only spec.env, never process.env.
-        child = spawn(command, args, { cwd: spec.cwd, env: spec.env });
+        child = spawn(command, args, { cwd: spec.cwd, env: spec.env, detached: true });
       } catch {
         finish({ code: null, signal: null, termination: "spawn-error" });
         return;
@@ -104,11 +116,11 @@ export function createSpawnProcessRunner(): ProcessRunner {
       let aborted = false;
       const timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        killChildGroup(child);
       }, spec.timeoutMs);
       const onAbort = () => {
         aborted = true;
-        child.kill("SIGKILL");
+        killChildGroup(child);
       };
       spec.abortSignal?.addEventListener("abort", onAbort, { once: true });
 

@@ -110,6 +110,7 @@ export function createInMemoryOutboxStore(): OutboxStore {
 
 export function createSqliteOutboxStore(dbPath: string): OutboxStore {
   const db = new DatabaseSync(dbPath);
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS outbox (
       event_id TEXT PRIMARY KEY,

@@ -5,7 +5,8 @@
  * push, checking out user branches in the main tree. The git runner is injected (argv spawn, no shell).
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
 export interface GitCommandResult {
@@ -73,11 +74,24 @@ function safeRealpath(p: string): string | null {
   }
 }
 
-/** Default git runner: argv spawn, no shell, bounded timeout. Production wiring may swap in the SDK runner. */
-export function createDefaultGitRunner(timeoutMs = 30_000): GitRunner {
+/**
+ * Default git runner (R10/H1): argv spawn, no shell, sanitized env (NEVER process.env). git config is
+ * neutralized (no system/global config, no credential helpers, no prompts) and hooks are disabled, so a
+ * repo's post-checkout/fsmonitor hook cannot run host code with host secrets.
+ */
+export function createDefaultGitRunner(timeoutMs = 30_000, home?: string): GitRunner {
+  const gitHome = home ?? mkdtempSync(join(tmpdir(), "ar-git-home-"));
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: gitHome,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+  };
+  const hardening = ["-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never"];
   return (args, cwd, signal) =>
     new Promise<GitCommandResult>((resolveResult, reject) => {
-      const child = spawn("git", args, { cwd, env: process.env, signal });
+      const child = spawn("git", [...hardening, ...args], { cwd, env, signal });
       let stdout = "";
       let stderr = "";
       const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
@@ -120,6 +134,9 @@ export class WorktreeManager {
     }
 
     // 3. resolve the base revision and validate baseRevision if supplied
+    if (input.baseBranch.startsWith("-")) {
+      return blocked("INVALID_BASE_BRANCH", "baseBranch must not start with a dash");
+    }
     const baseRef = await this.git(["-C", gitRoot, "rev-parse", input.baseBranch], gitRoot);
     if (baseRef.code !== 0) {
       return blocked("BASE_BRANCH_UNRESOLVED", `cannot resolve base branch '${input.baseBranch}'`);

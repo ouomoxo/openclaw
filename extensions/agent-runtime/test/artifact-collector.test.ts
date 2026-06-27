@@ -77,7 +77,7 @@ describe("ArtifactCollector", () => {
     expect(ev.forbiddenChanges.map((c) => c.path)).toContain(".env");
     expect(ev.head).toMatch(/^[0-9a-f]{40}$/);
     expect(ev.branch).toBe("main");
-    expect(ev.artifacts.length).toBe(3);
+    expect(ev.artifacts.length).toBe(2); // diff skipped because a forbidden file changed
     for (const a of ev.artifacts) {
       expect(existsSync(join(store, a.relativePath))).toBe(true);
     }
