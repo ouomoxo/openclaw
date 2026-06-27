@@ -39,7 +39,9 @@ describe("WorktreeManager (real temp git repo)", () => {
       allowedRepositoryRoots: [repoRoot],
     });
     expect(result.ok).toBe(true);
-    if (!result.ok) {return;}
+    if (!result.ok) {
+      return;
+    }
     expect(result.worktree.branch).toBe("agent/task_a/run_a");
     expect(existsSync(result.worktree.worktreeDir)).toBe(true);
     // main working tree is untouched: still on main at the original HEAD
@@ -67,7 +69,9 @@ describe("WorktreeManager (real temp git repo)", () => {
       allowedRepositoryRoots: [repoRoot],
     });
     expect(result.ok).toBe(false);
-    if (result.ok) {return;}
+    if (result.ok) {
+      return;
+    }
     expect(result.code).toBe("BASE_REVISION_MISMATCH");
   });
 
@@ -83,7 +87,9 @@ describe("WorktreeManager (real temp git repo)", () => {
       allowedRepositoryRoots: [join(tmpdir(), "some-other-root")],
     });
     expect(result.ok).toBe(false);
-    if (result.ok) {return;}
+    if (result.ok) {
+      return;
+    }
     expect(result.code).toBe("REPOSITORY_NOT_ALLOWLISTED");
   });
 
@@ -100,7 +106,9 @@ describe("WorktreeManager (real temp git repo)", () => {
       allowedRepositoryRoots: [notRepo],
     });
     expect(result.ok).toBe(false);
-    if (result.ok) {return;}
+    if (result.ok) {
+      return;
+    }
     expect(result.code).toBe("NOT_A_GIT_REPOSITORY");
   });
 });

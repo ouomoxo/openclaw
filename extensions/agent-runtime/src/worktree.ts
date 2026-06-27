@@ -53,10 +53,14 @@ export interface WorktreeState {
 
 function withinAny(target: string, roots: string[]): boolean {
   const real = safeRealpath(target);
-  if (real === null) {return false;}
+  if (real === null) {
+    return false;
+  }
   return roots.some((root) => {
     const realRoot = safeRealpath(root);
-    if (realRoot === null) {return false;}
+    if (realRoot === null) {
+      return false;
+    }
     return real === realRoot || real.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep);
   });
 }
@@ -167,13 +171,17 @@ export class WorktreeManager {
 
   async inspect(runId: string): Promise<WorktreeState> {
     const wt = this.prepared.get(runId);
-    if (!wt) {return { runId, worktreeExists: false, worktreeDir: "" };}
+    if (!wt) {
+      return { runId, worktreeExists: false, worktreeDir: "" };
+    }
     return { runId, worktreeExists: existsSync(wt.worktreeDir), worktreeDir: wt.worktreeDir };
   }
 
   async cleanup(runId: string): Promise<void> {
     const wt = this.prepared.get(runId);
-    if (!wt) {return;}
+    if (!wt) {
+      return;
+    }
     await this.git(
       ["-C", wt.gitRoot, "worktree", "remove", "--force", wt.worktreeDir],
       wt.gitRoot,
