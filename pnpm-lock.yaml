@@ -329,6 +329,15 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
 
+  extensions/agent-runtime:
+    devDependencies:
+      '@openclaw/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      openclaw:
+        specifier: 2026.5.28
+        version: 2026.5.28
+
   extensions/alibaba:
     devDependencies:
       '@openclaw/plugin-sdk':
@@ -8812,7 +8821,7 @@ snapshots:
 
   '@google/genai@2.6.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))':
     dependencies:
-      google-auth-library: 10.7.0
+      google-auth-library: 10.6.2
       p-retry: 4.6.2
       protobufjs: 7.6.3
       ws: 8.21.0

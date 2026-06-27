@@ -1,0 +1,24 @@
+{
+  "name": "@openclaw/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Experimental agent execution runtime (worker run over ACP). fixture/temp repos only, not production.",
+  "type": "module",
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*",
+    "openclaw": "2026.5.28"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.6.10"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
