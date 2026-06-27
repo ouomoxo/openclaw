@@ -164,9 +164,10 @@ function normalizeSource(source: string): string {
 }
 
 function structuralTokenSignature(source: string): string {
-  const interpolations = [...source.matchAll(/\\\([^)]*\)/gu)].map((match) => match[0]);
+  const swift = extractSwiftInterpolations(source);
+  const kotlin = extractKotlinInterpolations(source);
   const lineBreaks = (source.match(/\n/gu) ?? []).length;
-  return JSON.stringify({ interpolations, lineBreaks });
+  return JSON.stringify({ swift, kotlin, lineBreaks });
 }
 
 function addCandidate(
