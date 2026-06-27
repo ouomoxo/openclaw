@@ -35,7 +35,7 @@ export type QaTransportReportParams = {
   isolatedWorkers?: boolean;
 };
 
-export type QaTransportGatewayConfig = Pick<OpenClawConfig, "channels" | "messages">;
+export type QaTransportGatewayConfig = Partial<Pick<OpenClawConfig, "channels" | "messages">>;
 
 export type QaTransportState = {
   reset: () => void | Promise<void>;
@@ -176,6 +176,7 @@ export type QaTransportAdapter = {
     replyChannel: string;
     replyTo: string;
   };
+  createRuntimeEnvPatch?: () => NodeJS.ProcessEnv;
   handleAction: (params: {
     action: QaTransportActionName;
     args: Record<string, unknown>;

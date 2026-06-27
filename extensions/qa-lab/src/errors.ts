@@ -23,6 +23,7 @@ export type QaSuiteInfraErrorCode =
   | "gateway_startup_unhealthy"
   | "gateway_ready_timeout"
   | "qa_cli_timeout"
+  | "transport_unavailable"
   | "transport_ready_timeout";
 
 export class QaSuiteInfraError extends Error {

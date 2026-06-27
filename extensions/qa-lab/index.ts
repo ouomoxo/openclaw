@@ -1,6 +1,7 @@
 // Qa Lab plugin entrypoint registers its OpenClaw integration.
 import { definePluginEntry } from "./runtime-api.js";
 import { registerQaLabCli } from "./src/cli.js";
+import { installFakeProviderRuntimeHooks } from "./src/fake-provider-runtime-hooks.js";
 import { createQaLabWebSearchProvider } from "./src/qa-web-search-provider.js";
 
 export default definePluginEntry({
@@ -8,6 +9,7 @@ export default definePluginEntry({
   name: "QA Lab",
   description: "Private QA automation harness and debugger UI",
   register(api) {
+    installFakeProviderRuntimeHooks();
     api.registerWebSearchProvider(createQaLabWebSearchProvider());
     api.registerCli(
       async ({ program }) => {

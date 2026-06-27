@@ -556,6 +556,13 @@ function appendNodeOption(raw: string | undefined, option: string) {
   return parts.includes(option) ? parts.join(" ") : [...parts, option].join(" ");
 }
 
+function appendNodeOptions(raw: string | undefined, options: string) {
+  return options
+    .split(/\s+/u)
+    .filter(Boolean)
+    .reduce((current, option) => appendNodeOption(current, option), raw);
+}
+
 function shouldCaptureGatewayHeapCheckpoints(env: NodeJS.ProcessEnv = process.env) {
   return parseQaSuiteBooleanEnv(env.OPENCLAW_QA_GATEWAY_HEAP_CHECKPOINTS) === true;
 }
@@ -579,7 +586,11 @@ function mergeQaRuntimeEnvPatches(
     if (!patch) {
       continue;
     }
-    Object.assign(merged, patch);
+    const { NODE_OPTIONS, ...rest } = patch;
+    Object.assign(merged, rest);
+    if (NODE_OPTIONS) {
+      merged.NODE_OPTIONS = appendNodeOptions(merged.NODE_OPTIONS, NODE_OPTIONS);
+    }
   }
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
@@ -1558,6 +1569,7 @@ export async function runQaFlowSuite(params?: QaSuiteRunParams): Promise<QaSuite
         forcedRuntime: params?.forcedRuntime,
         mockBaseUrl: mock?.baseUrl,
       }),
+      transport.createRuntimeEnvPatch?.(),
       buildQaGatewayHeapCheckpointRuntimeEnvPatch(),
     ),
   });
