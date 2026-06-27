@@ -403,9 +403,15 @@ export async function noteMemorySearchHealth(
       error?: string;
       skipped?: boolean;
     };
+    noteFn?: typeof note;
+    includeWorkspaceMemoryHealth?: boolean;
+    skipQmdBinaryProbe?: boolean;
   },
 ): Promise<void> {
-  await noteWorkspaceMemoryHealth(cfg);
+  const noteFn = opts?.noteFn ?? note;
+  if (opts?.includeWorkspaceMemoryHealth !== false) {
+    await noteWorkspaceMemoryHealth(cfg);
+  }
 
   const agentId = resolveDefaultAgentId(cfg);
   const agentDir = resolveAgentDir(cfg, agentId);
@@ -413,7 +419,7 @@ export async function noteMemorySearchHealth(
   const hasRemoteApiKey = hasConfiguredMemorySecretInput(resolved?.remote?.apiKey);
 
   if (!resolved) {
-    note("Memory search is explicitly disabled (enabled: false).", "Memory search");
+    noteFn("Memory search is explicitly disabled (enabled: false).", "Memory search");
     return;
   }
   const provider =
@@ -429,10 +435,13 @@ export async function noteMemorySearchHealth(
     if (hasActiveAlternateMemoryPluginSlot(cfg)) {
       return;
     }
-    note("No active memory plugin is registered for the current config.", "Memory search");
+    noteFn("No active memory plugin is registered for the current config.", "Memory search");
     return;
   }
   if (backendConfig.backend === "qmd") {
+    if (opts?.skipQmdBinaryProbe === true) {
+      return;
+    }
     const qmdCheck = await checkQmdBinaryAvailability({
       command: backendConfig.qmd?.command ?? "qmd",
       env: process.env,
@@ -441,7 +450,7 @@ export async function noteMemorySearchHealth(
     if (!qmdCheck.available) {
       const workspaceProbeFailed = resolveQmdBinaryUnavailableReason(qmdCheck) === "workspace-cwd";
       const probeError = qmdCheck.error.trim();
-      note(
+      noteFn(
         [
           workspaceProbeFailed
             ? "QMD memory backend is configured, but the agent workspace directory could not be used for the QMD startup probe."
@@ -479,7 +488,7 @@ export async function noteMemorySearchHealth(
       return;
     }
     const detail = opts?.gatewayMemoryProbe?.error?.trim();
-    note(
+    noteFn(
       [
         hasExplicitLocalModel
           ? 'Memory search provider is set to "local" and a local model path is configured, but local embeddings are not confirmed ready.'
@@ -506,7 +515,7 @@ export async function noteMemorySearchHealth(
     isOpenAICompatibleMemoryProvider(provider, cfg) &&
     !resolveOpenAICompatibleMemoryBaseUrl(provider, cfg, resolved.remote?.baseUrl)
   ) {
-    note(
+    noteFn(
       [
         `Memory search provider is set to "${provider}" but no OpenAI-compatible embeddings endpoint was configured.`,
         "Set agents.defaults.memorySearch.remote.baseUrl to the /v1 endpoint for your embeddings server.",
@@ -522,7 +531,7 @@ export async function noteMemorySearchHealth(
   }
 
   if (isOpenAICompatibleMemoryProvider(provider, cfg) && !normalizeOptionalString(resolved.model)) {
-    note(
+    noteFn(
       [
         `Memory search provider is set to "${provider}" but no OpenAI-compatible embedding model was configured.`,
         "Set agents.defaults.memorySearch.model to the embedding model id your server expects.",
@@ -552,7 +561,7 @@ export async function noteMemorySearchHealth(
       return;
     }
     const gatewayProbeWarning = buildGatewayProbeWarning(opts?.gatewayMemoryProbe);
-    note(
+    noteFn(
       [
         gatewayProbeWarning
           ? `Memory search provider "${provider}" is configured, but the gateway reports embeddings are not ready.`
@@ -573,7 +582,7 @@ export async function noteMemorySearchHealth(
   }
 
   if (opts?.gatewayMemoryProbe?.checked && opts.gatewayMemoryProbe.ready) {
-    note(
+    noteFn(
       [
         `Memory search provider is set to "${provider}" but the API key was not found in the CLI environment.`,
         "The running gateway reports memory embeddings are ready for the default agent.",
@@ -586,7 +595,7 @@ export async function noteMemorySearchHealth(
   const gatewayProbeWarning = buildGatewayProbeWarning(opts?.gatewayMemoryProbe);
   const envVar = resolvePrimaryMemoryProviderEnvVar(provider);
 
-  note(
+  noteFn(
     [
       `Memory search provider is set to "${provider}" but no API key was found.`,
       `Semantic recall will not work without a valid API key.`,

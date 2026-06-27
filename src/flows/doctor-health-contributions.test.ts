@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   maybeRepairLegacyOAuthSidecarProfiles: vi.fn().mockResolvedValue(undefined),
   noteAuthProfileHealth: vi.fn().mockResolvedValue(undefined),
   noteLegacyCodexProviderOverride: vi.fn(),
+  noteMemorySearchHealth: vi.fn().mockResolvedValue(undefined),
   buildGatewayConnectionDetails: vi.fn(() => ({ message: "gateway details" })),
   resolveSecretInputRef: vi.fn((params: { value?: unknown }) => ({
     ref:
@@ -146,6 +147,12 @@ vi.mock("../commands/doctor-auth-oauth-sidecar.js", () => ({
 vi.mock("../commands/doctor-auth.js", () => ({
   noteAuthProfileHealth: mocks.noteAuthProfileHealth,
   noteLegacyCodexProviderOverride: mocks.noteLegacyCodexProviderOverride,
+}));
+
+vi.mock("../commands/doctor-memory-search.js", () => ({
+  maybeRepairMemoryRecallHealth: vi.fn().mockResolvedValue(undefined),
+  noteMemoryRecallHealth: vi.fn().mockResolvedValue(undefined),
+  noteMemorySearchHealth: mocks.noteMemorySearchHealth,
 }));
 
 vi.mock("../gateway/call.js", () => ({
@@ -329,6 +336,8 @@ describe("doctor health contributions", () => {
     mocks.noteAuthProfileHealth.mockClear();
     mocks.noteAuthProfileHealth.mockResolvedValue(undefined);
     mocks.noteLegacyCodexProviderOverride.mockClear();
+    mocks.noteMemorySearchHealth.mockClear();
+    mocks.noteMemorySearchHealth.mockResolvedValue(undefined);
     mocks.buildGatewayConnectionDetails.mockClear();
     mocks.buildGatewayConnectionDetails.mockReturnValue({ message: "gateway details" });
     mocks.resolveSecretInputRef.mockClear();
@@ -1050,6 +1059,64 @@ describe("doctor health contributions", () => {
     expect(contributionIds).toContain("core/doctor/session-transcripts");
     expect(contributionIds).toContain("core/doctor/session-snapshots");
     expect(contributionChecks.map((check) => check.id)).toEqual(contributionIds);
+  });
+
+  it("collects memory-search notes as structured findings", async () => {
+    const contribution = requireDoctorContribution("doctor:memory-search");
+    const check = contribution.healthChecks[0] as HealthCheck;
+    mocks.noteMemorySearchHealth.mockImplementationOnce(async (_cfg, opts) => {
+      opts.noteFn(
+        [
+          'Memory search provider is set to "openai" but no API key was found.',
+          "Semantic recall will not work without a valid API key.",
+          "Fix (pick one):",
+          "- Set OPENAI_API_KEY in your environment",
+        ].join("\n"),
+        "Memory search",
+      );
+    });
+
+    const findings = await check.detect({
+      mode: "lint",
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+      cfg: {},
+    });
+
+    expect(contribution.healthCheckIds).toEqual(["core/doctor/memory-search"]);
+    expect(mocks.noteMemorySearchHealth).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({
+        includeWorkspaceMemoryHealth: false,
+        skipQmdBinaryProbe: true,
+        gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+        noteFn: expect.any(Function),
+      }),
+    );
+    expect(findings).toEqual([
+      expect.objectContaining({
+        checkId: "core/doctor/memory-search",
+        severity: "warning",
+        path: "agents.defaults.memorySearch.provider",
+        message: 'Memory search provider is set to "openai" but no API key was found.',
+        fixHint: expect.stringContaining("OPENAI_API_KEY"),
+      }),
+    ]);
+  });
+
+  it("does not report disabled memory search as a lint warning", async () => {
+    const contribution = requireDoctorContribution("doctor:memory-search");
+    const check = contribution.healthChecks[0] as HealthCheck;
+    mocks.noteMemorySearchHealth.mockImplementationOnce(async (_cfg, opts) => {
+      opts.noteFn("Memory search is explicitly disabled (enabled: false).", "Memory search");
+    });
+
+    const findings = await check.detect({
+      mode: "lint",
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+      cfg: {},
+    });
+
+    expect(findings).toEqual([]);
   });
 
   it("uses legacy run when a contribution also declares structured health", async () => {
