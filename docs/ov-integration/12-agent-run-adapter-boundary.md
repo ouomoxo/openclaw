@@ -60,7 +60,8 @@ first slice = `FIXTURE_PROFILE` (`:5-11`) only — and **refuses the claim if th
 dispatch `trustLevel` disagrees with OpenClaw's own classification** under the
 cross-repo mapping `fixture↔fixture`, `trusted-local↔trusted-local`,
 **`production↔untrusted`** (OpenClaw's enum is `fixture|trusted-local|untrusted`,
-`src/types.ts:40`; `untrusted` is rejected at `:31-36`). `runWorker` then calls
+`src/types.ts:40`; `untrusted` is rejected at `src/repository-profile.ts:31-36`).
+`runWorker` then calls
 `gateRepositoryTrust` (`:16-39`) internally as well. Three independent guards, all
 must pass: OV dispatch gate → adapter trust-agreement pre-check → runtime
 `gateRepositoryTrust`.
